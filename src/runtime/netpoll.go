@@ -542,22 +542,41 @@ func poll_runtime_pollUnblock(pd *pollDesc) {
 //
 // This may run while the world is stopped, so write barriers are not allowed.
 //
+// netpollready 由平台特定的 netpoll 函数调用
+// 用于通知与 pd 关联的文件描述符已经准备好进行 I/O 操作
+//
 //go:nowritebarrier
 func netpollready(toRun *gList, pd *pollDesc, mode int32) int32 {
+	// delta 用于跟踪等待者数量的变化
 	delta := int32(0)
+
+	// rg: 等待读取的 goroutine
+	// wg: 等待写入的 goroutine
 	var rg, wg *g
+
+	// 处理读就绪事件
+	// mode 可能是 'r' 或 'r'+'w'
 	if mode == 'r' || mode == 'r'+'w' {
+		// 解除读等待的 goroutine 阻塞
 		rg = netpollunblock(pd, 'r', true, &delta)
 	}
+
+	// 处理写就绪事件
+	// mode 可能是 'w' 或 'r'+'w'
 	if mode == 'w' || mode == 'r'+'w' {
+		// 解除写等待的 goroutine 阻塞
 		wg = netpollunblock(pd, 'w', true, &delta)
 	}
+
+	// 将解除阻塞的 goroutine 添加到待运行列表
 	if rg != nil {
-		toRun.push(rg)
+		toRun.push(rg) // 添加读 goroutine
 	}
 	if wg != nil {
-		toRun.push(wg)
+		toRun.push(wg) // 添加写 goroutine
 	}
+
+	// 返回等待者数量的变化
 	return delta
 }
 
@@ -649,34 +668,53 @@ func netpollblock(pd *pollDesc, mode int32, waitio bool) bool {
 // It adds any adjustment to netpollWaiters to *delta;
 // this adjustment should be applied after the goroutine has
 // been marked ready.
+//
+// netpollunblock 将 pd.rg（读）或 pd.wg（写）转换为就绪状态
+// 返回在 pd.rg 或 pd.wg 上阻塞的 goroutine
 func netpollunblock(pd *pollDesc, mode int32, ioready bool, delta *int32) *g {
-	gpp := &pd.rg
+	// 根据模式选择读或写等待组指针
+	gpp := &pd.rg // 默认读等待组
 	if mode == 'w' {
-		gpp = &pd.wg
+		gpp = &pd.wg // 写等待组
 	}
 
+	// 循环尝试更新等待组状态
 	for {
+		// 获取当前状态
 		old := gpp.Load()
+
+		// 如果已经是就绪状态，无需处理
 		if old == pdReady {
 			return nil
 		}
+
+		// 如果没有等待的 goroutine 且不是 I/O 就绪
+		// 则不设置就绪状态
 		if old == pdNil && !ioready {
 			// Only set pdReady for ioready. runtime_pollWait
 			// will check for timeout/cancel before waiting.
 			return nil
 		}
-		new := pdNil
+
+		// 确定新状态
+		new := pdNil // 默认设为空闲
 		if ioready {
-			new = pdReady
+			new = pdReady // I/O 就绪时设为就绪
 		}
+
+		// 原子地更新状态
 		if gpp.CompareAndSwap(old, new) {
 			if old == pdWait {
+				// 如果之前是等待状态，转换为空闲状态
 				old = pdNil
 			} else if old != pdNil {
+				// 如果之前不是空闲状态，减少等待计数
 				*delta -= 1
 			}
+			// 返回被解除阻塞的 goroutine
 			return (*g)(unsafe.Pointer(old))
 		}
+		// CAS 失败则重试
 	}
 }
 

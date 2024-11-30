@@ -215,15 +215,32 @@ func poll_runtime_pollServerInit() {
 	netpollGenericInit()
 }
 
+// netpollGenericInit 初始化网络轮询器的通用部分
+//
+// 该函数确保网络轮询器只被初始化一次，使用了双重检查锁定模式（Double-Checked Locking Pattern）
+// 来保证线程安全和初始化的唯一性
 func netpollGenericInit() {
+	// 首次检查：检查是否已经初始化
+	// 使用原子操作确保线程安全
 	if netpollInited.Load() == 0 {
+		// 初始化两个互斥锁
+		// - netpollInitLock: 用于保护初始化过程
+		// - pollcache.lock: 用于保护轮询缓存
 		lockInit(&netpollInitLock, lockRankNetpollInit)
 		lockInit(&pollcache.lock, lockRankPollCache)
+
+		// 获取初始化锁
 		lock(&netpollInitLock)
+
+		// 二次检查：确保在获取锁的过程中没有其他goroutine完成初始化
 		if netpollInited.Load() == 0 {
+			// 调用平台特定的初始化函数（如 epoll_create、kqueue 等）
 			netpollinit()
+			// 标记初始化完成
 			netpollInited.Store(1)
 		}
+
+		// 释放初始化锁
 		unlock(&netpollInitLock)
 	}
 }
@@ -240,40 +257,54 @@ func poll_runtime_isPollServerDescriptor(fd uintptr) bool {
 	return netpollIsPollDescriptor(fd)
 }
 
+// poll_runtime_pollOpen 为给定的文件描述符创建并初始化一个轮询描述符
+//
 //go:linkname poll_runtime_pollOpen internal/poll.runtime_pollOpen
 func poll_runtime_pollOpen(fd uintptr) (*pollDesc, int) {
+	// 从轮询缓存中分配一个轮询描述符
 	pd := pollcache.alloc()
+
+	// 加锁保护轮询描述符的初始化
 	lock(&pd.lock)
+
+	// 检查写等待组的状态，确保它是空闲的或就绪的
 	wg := pd.wg.Load()
 	if wg != pdNil && wg != pdReady {
 		throw("runtime: blocked write on free polldesc")
 	}
+
+	// 检查读等待组的状态，确保它是空闲的或就绪的
 	rg := pd.rg.Load()
 	if rg != pdNil && rg != pdReady {
 		throw("runtime: blocked read on free polldesc")
 	}
-	pd.fd = fd
+
+	// 初始化轮询描述符的各个字段
+	pd.fd = fd // 设置文件描述符
 	if pd.fdseq.Load() == 0 {
-		// The value 0 is special in setEventErr, so don't use it.
+		// 0 值在 setEventErr 中有特殊含义，避免使用它
 		pd.fdseq.Store(1)
 	}
-	pd.closing = false
-	pd.setEventErr(false, 0)
-	pd.rseq++
-	pd.rg.Store(pdNil)
-	pd.rd = 0
-	pd.wseq++
-	pd.wg.Store(pdNil)
-	pd.wd = 0
-	pd.self = pd
-	pd.publishInfo()
-	unlock(&pd.lock)
+	pd.closing = false       // 设置为非关闭状态
+	pd.setEventErr(false, 0) // 清除事件错误标志
+	pd.rseq++                // 增加读序列号
+	pd.rg.Store(pdNil)       // 重置读等待组
+	pd.rd = 0                // 清除读截止时间
+	pd.wseq++                // 增加写序列号
+	pd.wg.Store(pdNil)       // 重置写等待组
+	pd.wd = 0                // 清除写截止时间
+	pd.self = pd             // 设置自引用
+	pd.publishInfo()         // 发布描述符信息
+	unlock(&pd.lock)         // 释放锁
 
+	// 将文件描述符注册到操作系统的轮询系统（如 epoll）
 	errno := netpollopen(fd, pd)
 	if errno != 0 {
+		// 如果注册失败，释放轮询描述符并返回错误
 		pollcache.free(pd)
 		return nil, int(errno)
 	}
+
 	return pd, 0
 }
 

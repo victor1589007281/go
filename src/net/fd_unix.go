@@ -37,7 +37,18 @@ func newFD(sysfd, family, sotype int, net string) (*netFD, error) {
 	return ret, nil
 }
 
+// init 初始化网络文件描述符
+//
+// 该方法通过调用 poll.FD 的 Init 方法来初始化底层文件描述符
+// - fd.net: 网络类型（如 "tcp"、"udp" 等）
+// - true: 表示这是一个网络连接，需要设置为非阻塞模式
+//
+// 初始化过程包括：
+// 1. 设置非阻塞模式
+// 2. 设置关闭时执行的清理操作
+// 3. 将文件描述符添加到运行时网络轮询器中
 func (fd *netFD) init() error {
+	// 调用 poll.FD 的 Init 方法完成实际的初始化
 	return fd.pfd.Init(fd.net, true)
 }
 

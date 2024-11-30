@@ -1,7 +1,3 @@
-// Copyright 2010 The Go Authors. All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
-
 package net
 
 import (
@@ -745,33 +741,52 @@ func (lc *ListenConfig) SetMultipathTCP(use bool) {
 //
 // See func Listen for a description of the network and address
 // parameters.
+//
+// 在本地网络地址上创建监听器
+//
+// 关于 network 和 address 参数的详细说明，请参考 Listen 函数的文档
 func (lc *ListenConfig) Listen(ctx context.Context, network, address string) (Listener, error) {
+	// 使用默认解析器解析地址，获取可用的地址列表
 	addrs, err := DefaultResolver.resolveAddrList(ctx, "listen", network, address, nil)
 	if err != nil {
+		// 如果解析失败，返回带有详细错误信息的 OpError
 		return nil, &OpError{Op: "listen", Net: network, Source: nil, Addr: nil, Err: err}
 	}
+
+	// 创建系统监听器对象，包含配置信息和网络参数
 	sl := &sysListener{
 		ListenConfig: *lc,
 		network:      network,
 		address:      address,
 	}
+
 	var l Listener
+	// 获取第一个地址（优先使用 IPv4）
 	la := addrs.first(isIPv4)
+
+	// 根据地址类型选择不同的监听方式
 	switch la := la.(type) {
 	case *TCPAddr:
+		// TCP 地址：根据是否启用多路径 TCP 选择不同的监听方法
 		if sl.MultipathTCP() {
 			l, err = sl.listenMPTCP(ctx, la)
 		} else {
 			l, err = sl.listenTCP(ctx, la)
 		}
 	case *UnixAddr:
+		// Unix 域套接字地址
 		l, err = sl.listenUnix(ctx, la)
 	default:
+		// 不支持的地址类型，返回错误
 		return nil, &OpError{Op: "listen", Net: sl.network, Source: nil, Addr: la, Err: &AddrError{Err: "unexpected address type", Addr: address}}
 	}
+
+	// 如果创建监听器过程中发生错误，返回带有详细错误信息的 OpError
 	if err != nil {
 		return nil, &OpError{Op: "listen", Net: sl.network, Source: nil, Addr: la, Err: err} // l is non-nil interface containing nil pointer
 	}
+
+	// 返回创建的监听器
 	return l, nil
 }
 
@@ -834,8 +849,24 @@ type sysListener struct {
 //
 // Listen uses context.Background internally; to specify the context, use
 // [ListenConfig.Listen].
+//
+// 在本地网络地址上创建并返回一个监听器
+//
+// network 参数必须是 "tcp"、"tcp4"、"tcp6"、"unix" 或 "unixpacket"
+//
+// 对于 TCP 网络：
+// - 如果 address 参数中的主机为空或未指定 IP 地址，将监听本地系统所有可用的单播和任播 IP 地址
+// - 如果只想使用 IPv4，需要指定 network 为 "tcp4"
+// - address 可以使用主机名，但不推荐，因为这只会为主机的其中一个 IP 地址创建监听器
+// - 如果 address 参数中的端口为空或 "0"（如 "127.0.0.1:" 或 "[::1]:0"），将自动选择一个端口号
+// - 可以通过监听器的 Addr 方法获取实际选择的端口号
+//
+// 该函数内部使用 context.Background()；如果需要指定上下文，请使用 ListenConfig.Listen
 func Listen(network, address string) (Listener, error) {
+	// 创建一个默认的 ListenConfig 配置对象
 	var lc ListenConfig
+	// 使用默认的后台上下文调用 ListenConfig.Listen 方法
+	// 该方法会实际创建并返回一个网络监听器
 	return lc.Listen(context.Background(), network, address)
 }
 

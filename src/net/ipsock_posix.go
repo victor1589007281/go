@@ -156,14 +156,33 @@ func favoriteAddrFamily(network string, laddr, raddr sockaddr, mode string) (fam
 	return syscall.AF_INET6, false
 }
 
+// internetSocket 创建一个网络套接字
+//
+// 参数说明：
+// - ctx: 上下文，用于控制操作的生命周期
+// - net: 网络类型（如 "tcp"、"tcp4"、"tcp6"）
+// - laddr: 本地地址
+// - raddr: 远程地址
+// - sotype: 套接字类型（如 SOCK_STREAM 用于 TCP）
+// - proto: 协议号
+// - mode: 操作模式（"dial" 或 "listen"）
+// - ctrlCtxFn: 用于控制底层连接的回调函数
 func internetSocket(ctx context.Context, net string, laddr, raddr sockaddr, sotype, proto int, mode string, ctrlCtxFn func(context.Context, string, string, syscall.RawConn) error) (fd *netFD, err error) {
+	// 特殊平台处理：在某些操作系统上，如果是拨号模式且远程地址是通配符地址，
+	// 则将远程地址转换为本地地址
 	switch runtime.GOOS {
 	case "aix", "windows", "openbsd", "js", "wasip1":
 		if mode == "dial" && raddr.isWildcard() {
 			raddr = raddr.toLocal(net)
 		}
 	}
+
+	// 根据网络类型、本地地址、远程地址和操作模式选择合适的地址族
+	// family 可能是 AF_INET（IPv4）或 AF_INET6（IPv6）
+	// ipv6only 表示是否仅使用 IPv6
 	family, ipv6only := favoriteAddrFamily(net, laddr, raddr, mode)
+
+	// 创建并返回实际的套接字
 	return socket(ctx, net, family, sotype, proto, ipv6only, laddr, raddr, ctrlCtxFn)
 }
 

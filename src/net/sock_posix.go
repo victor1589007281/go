@@ -15,15 +15,22 @@ import (
 
 // socket returns a network file descriptor that is ready for
 // asynchronous I/O using the network poller.
+//
+// socket 返回一个网络文件描述符，该描述符已准备好使用网络轮询器进行异步 I/O
 func socket(ctx context.Context, net string, family, sotype, proto int, ipv6only bool, laddr, raddr sockaddr, ctrlCtxFn func(context.Context, string, string, syscall.RawConn) error) (fd *netFD, err error) {
+	// 创建系统套接字
 	s, err := sysSocket(family, sotype, proto)
 	if err != nil {
 		return nil, err
 	}
+
+	// 设置默认的套接字选项（如 IPv6 only、地址重用等）
 	if err = setDefaultSockopts(s, family, sotype, ipv6only); err != nil {
 		poll.CloseFunc(s)
 		return nil, err
 	}
+
+	// 创建网络文件描述符
 	if fd, err = newFD(s, family, sotype, net); err != nil {
 		poll.CloseFunc(s)
 		return nil, err
@@ -32,34 +39,36 @@ func socket(ctx context.Context, net string, family, sotype, proto int, ipv6only
 	// This function makes a network file descriptor for the
 	// following applications:
 	//
+	// 此函数为以下应用场景创建网络文件描述符：
+	//
 	// - An endpoint holder that opens a passive stream
 	//   connection, known as a stream listener
+	// - 流监听器：用于打开被动流连接的端点持有者
 	//
 	// - An endpoint holder that opens a destination-unspecific
 	//   datagram connection, known as a datagram listener
+	// - 数据报监听器：用于打开未指定目标的数据报连接的端点持有者
 	//
 	// - An endpoint holder that opens an active stream or a
-	//   destination-specific datagram connection, known as a
-	//   dialer
+	//   destination-specific datagram connection, known as a dialer
+	// - 拨号器：用于打开主动流连接或指定目标的数据报连接的端点持有者
 	//
 	// - An endpoint holder that opens the other connection, such
 	//   as talking to the protocol stack inside the kernel
-	//
-	// For stream and datagram listeners, they will only require
-	// named sockets, so we can assume that it's just a request
-	// from stream or datagram listeners when laddr is not nil but
-	// raddr is nil. Otherwise we assume it's just for dialers or
-	// the other connection holders.
+	// - 其他连接：如与内核协议栈通信的端点持有者
 
+	// 当有本地地址但没有远程地址时，表示这是一个监听器
 	if laddr != nil && raddr == nil {
 		switch sotype {
 		case syscall.SOCK_STREAM, syscall.SOCK_SEQPACKET:
+			// 对于流式套接字，设置为流监听模式
 			if err := fd.listenStream(ctx, laddr, listenerBacklog(), ctrlCtxFn); err != nil {
 				fd.Close()
 				return nil, err
 			}
 			return fd, nil
 		case syscall.SOCK_DGRAM:
+			// 对于数据报套接字，设置为数据报监听模式
 			if err := fd.listenDatagram(ctx, laddr, ctrlCtxFn); err != nil {
 				fd.Close()
 				return nil, err
@@ -67,6 +76,8 @@ func socket(ctx context.Context, net string, family, sotype, proto int, ipv6only
 			return fd, nil
 		}
 	}
+
+	// 如果不是监听模式，则进行连接操作
 	if err := fd.dial(ctx, laddr, raddr, ctrlCtxFn); err != nil {
 		fd.Close()
 		return nil, err
@@ -147,16 +158,27 @@ func (fd *netFD) dial(ctx context.Context, laddr, raddr sockaddr, ctrlCtxFn func
 	return nil
 }
 
+// listenStream 设置流式套接字（如 TCP）的监听
+//
+// 参数说明：
+// - ctx: 上下文，用于控制操作的生命周期
+// - laddr: 要监听的本地地址
+// - backlog: 监听队列的最大长度
+// - ctrlCtxFn: 用于自定义控制套接字的回调函数
 func (fd *netFD) listenStream(ctx context.Context, laddr sockaddr, backlog int, ctrlCtxFn func(context.Context, string, string, syscall.RawConn) error) error {
 	var err error
+	// 设置监听套接字的默认选项（如地址重用等）
 	if err = setDefaultListenerSockopts(fd.pfd.Sysfd); err != nil {
 		return err
 	}
+
+	// 将高层地址转换为系统层套接字地址
 	var lsa syscall.Sockaddr
 	if lsa, err = laddr.sockaddr(fd.family); err != nil {
 		return err
 	}
 
+	// 如果提供了控制函数，执行自定义的套接字配置
 	if ctrlCtxFn != nil {
 		c := newRawConn(fd)
 		if err := ctrlCtxFn(ctx, fd.ctrlNetwork(), laddr.String(), c); err != nil {
@@ -164,16 +186,24 @@ func (fd *netFD) listenStream(ctx context.Context, laddr sockaddr, backlog int, 
 		}
 	}
 
+	// 将套接字绑定到指定的本地地址
 	if err = syscall.Bind(fd.pfd.Sysfd, lsa); err != nil {
 		return os.NewSyscallError("bind", err)
 	}
+
+	// 开始监听连接请求
 	if err = listenFunc(fd.pfd.Sysfd, backlog); err != nil {
 		return os.NewSyscallError("listen", err)
 	}
+
+	// 初始化网络文件描述符（设置非阻塞模式等）
 	if err = fd.init(); err != nil {
 		return err
 	}
+
+	// 获取实际绑定的地址（可能与请求的地址不同，比如使用了随机端口）
 	lsa, _ = syscall.Getsockname(fd.pfd.Sysfd)
+	// 设置本地地址，远程地址为 nil（因为是监听套接字）
 	fd.setAddr(fd.addrFunc()(lsa), nil)
 	return nil
 }

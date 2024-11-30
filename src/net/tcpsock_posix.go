@@ -175,20 +175,49 @@ func (ln *TCPListener) file() (*os.File, error) {
 	return f, nil
 }
 
+// listenTCP 创建一个 TCP 网络监听器
+//
+// 参数说明：
+// - ctx: 上下文，用于控制操作的生命周期
+// - laddr: 本地 TCP 地址，指定监听的地址和端口
+//
+// 内部调用 listenTCPProto 并使用默认协议号(0)创建监听器
 func (sl *sysListener) listenTCP(ctx context.Context, laddr *TCPAddr) (*TCPListener, error) {
+	// 调用 listenTCPProto，最后一个参数 0 表示使用默认的 TCP 协议
 	return sl.listenTCPProto(ctx, laddr, 0)
 }
 
+// listenTCPProto 使用指定的协议创建 TCP 网络监听器
+//
+// 参数说明：
+// - ctx: 上下文，用于控制操作的生命周期
+// - laddr: 本地 TCP 地址，指定监听的地址和端口
+// - proto: 协议号，0 表示使用默认 TCP 协议
 func (sl *sysListener) listenTCPProto(ctx context.Context, laddr *TCPAddr, proto int) (*TCPListener, error) {
+	// 定义用于控制底层连接的函数变量
 	var ctrlCtxFn func(ctx context.Context, network, address string, c syscall.RawConn) error
+
+	// 如果配置中指定了自定义的控制函数，则创建包装函数
 	if sl.ListenConfig.Control != nil {
 		ctrlCtxFn = func(ctx context.Context, network, address string, c syscall.RawConn) error {
 			return sl.ListenConfig.Control(network, address, c)
 		}
 	}
+
+	// 创建底层网络套接字
+	// - sl.network: 网络类型（如 "tcp"、"tcp4"、"tcp6"）
+	// - laddr: 本地地址
+	// - nil: 远程地址（监听时为空）
+	// - syscall.SOCK_STREAM: 表示使用面向连接的 TCP 协议
+	// - proto: 指定协议号
+	// - "listen": 操作类型
 	fd, err := internetSocket(ctx, sl.network, laddr, nil, syscall.SOCK_STREAM, proto, "listen", ctrlCtxFn)
 	if err != nil {
 		return nil, err
 	}
+
+	// 创建并返回 TCP 监听器对象，包含：
+	// - fd: 底层文件描述符
+	// - lc: 监听器配置
 	return &TCPListener{fd: fd, lc: sl.ListenConfig}, nil
 }

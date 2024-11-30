@@ -174,47 +174,47 @@ type Conn interface {
 }
 
 type conn struct {
-	fd *netFD
+	fd *netFD // 连接的底层文件描述符
 }
 
-func (c *conn) ok() bool { return c != nil && c.fd != nil }
+func (c *conn) ok() bool { return c != nil && c.fd != nil } // 检查连接是否有效
 
 // Implementation of the Conn interface.
 
 // Read implements the Conn Read method.
 func (c *conn) Read(b []byte) (int, error) {
 	if !c.ok() {
-		return 0, syscall.EINVAL
+		return 0, syscall.EINVAL // 如果连接无效，返回错误
 	}
-	n, err := c.fd.Read(b)
+	n, err := c.fd.Read(b) // 从底层文件描述符读取数据
 	if err != nil && err != io.EOF {
-		err = &OpError{Op: "read", Net: c.fd.net, Source: c.fd.laddr, Addr: c.fd.raddr, Err: err}
+		err = &OpError{Op: "read", Net: c.fd.net, Source: c.fd.laddr, Addr: c.fd.raddr, Err: err} // 包装错误
 	}
-	return n, err
+	return n, err // 返回读取的字节数和错误
 }
 
 // Write implements the Conn Write method.
 func (c *conn) Write(b []byte) (int, error) {
 	if !c.ok() {
-		return 0, syscall.EINVAL
+		return 0, syscall.EINVAL // 如果连接无效，返回错误
 	}
-	n, err := c.fd.Write(b)
+	n, err := c.fd.Write(b) // 向底层文件描述符写入数据
 	if err != nil {
-		err = &OpError{Op: "write", Net: c.fd.net, Source: c.fd.laddr, Addr: c.fd.raddr, Err: err}
+		err = &OpError{Op: "write", Net: c.fd.net, Source: c.fd.laddr, Addr: c.fd.raddr, Err: err} // 包装错误
 	}
-	return n, err
+	return n, err // 返回写入的字节数和错误
 }
 
 // Close closes the connection.
 func (c *conn) Close() error {
 	if !c.ok() {
-		return syscall.EINVAL
+		return syscall.EINVAL // 如果连接无效，返回错误
 	}
-	err := c.fd.Close()
+	err := c.fd.Close() // 关闭底层文件描述符
 	if err != nil {
-		err = &OpError{Op: "close", Net: c.fd.net, Source: c.fd.laddr, Addr: c.fd.raddr, Err: err}
+		err = &OpError{Op: "close", Net: c.fd.net, Source: c.fd.laddr, Addr: c.fd.raddr, Err: err} // 包装错误
 	}
-	return err
+	return err // 返回关闭操作的错误
 }
 
 // LocalAddr returns the local network address.
@@ -222,9 +222,9 @@ func (c *conn) Close() error {
 // do not modify it.
 func (c *conn) LocalAddr() Addr {
 	if !c.ok() {
-		return nil
+		return nil // 如果连接无效，返回 nil
 	}
-	return c.fd.laddr
+	return c.fd.laddr // 返回本地地址
 }
 
 // RemoteAddr returns the remote network address.
@@ -232,66 +232,66 @@ func (c *conn) LocalAddr() Addr {
 // do not modify it.
 func (c *conn) RemoteAddr() Addr {
 	if !c.ok() {
-		return nil
+		return nil // 如果连接无效，返回 nil
 	}
-	return c.fd.raddr
+	return c.fd.raddr // 返回远程地址
 }
 
 // SetDeadline implements the Conn SetDeadline method.
 func (c *conn) SetDeadline(t time.Time) error {
 	if !c.ok() {
-		return syscall.EINVAL
+		return syscall.EINVAL // 如果连接无效，返回错误
 	}
 	if err := c.fd.SetDeadline(t); err != nil {
-		return &OpError{Op: "set", Net: c.fd.net, Source: nil, Addr: c.fd.laddr, Err: err}
+		return &OpError{Op: "set", Net: c.fd.net, Source: nil, Addr: c.fd.laddr, Err: err} // 包装错误
 	}
-	return nil
+	return nil // 返回 nil 表示成功
 }
 
 // SetReadDeadline implements the Conn SetReadDeadline method.
 func (c *conn) SetReadDeadline(t time.Time) error {
 	if !c.ok() {
-		return syscall.EINVAL
+		return syscall.EINVAL // 如果连接无效，返回错误
 	}
 	if err := c.fd.SetReadDeadline(t); err != nil {
-		return &OpError{Op: "set", Net: c.fd.net, Source: nil, Addr: c.fd.laddr, Err: err}
+		return &OpError{Op: "set", Net: c.fd.net, Source: nil, Addr: c.fd.laddr, Err: err} // 包装错误
 	}
-	return nil
+	return nil // 返回 nil 表示成功
 }
 
 // SetWriteDeadline implements the Conn SetWriteDeadline method.
 func (c *conn) SetWriteDeadline(t time.Time) error {
 	if !c.ok() {
-		return syscall.EINVAL
+		return syscall.EINVAL // 如果连接无效，返回错误
 	}
 	if err := c.fd.SetWriteDeadline(t); err != nil {
-		return &OpError{Op: "set", Net: c.fd.net, Source: nil, Addr: c.fd.laddr, Err: err}
+		return &OpError{Op: "set", Net: c.fd.net, Source: nil, Addr: c.fd.laddr, Err: err} // 包装错误
 	}
-	return nil
+	return nil // 返回 nil 表示成功
 }
 
 // SetReadBuffer sets the size of the operating system's
 // receive buffer associated with the connection.
 func (c *conn) SetReadBuffer(bytes int) error {
 	if !c.ok() {
-		return syscall.EINVAL
+		return syscall.EINVAL // 如果连接无效，返回错误
 	}
 	if err := setReadBuffer(c.fd, bytes); err != nil {
-		return &OpError{Op: "set", Net: c.fd.net, Source: nil, Addr: c.fd.laddr, Err: err}
+		return &OpError{Op: "set", Net: c.fd.net, Source: c.fd.laddr, Err: err} // 包装错误
 	}
-	return nil
+	return nil // 返回 nil 表示成功
 }
 
 // SetWriteBuffer sets the size of the operating system's
 // transmit buffer associated with the connection.
 func (c *conn) SetWriteBuffer(bytes int) error {
 	if !c.ok() {
-		return syscall.EINVAL
+		return syscall.EINVAL // 如果连接无效，返回错误
 	}
 	if err := setWriteBuffer(c.fd, bytes); err != nil {
-		return &OpError{Op: "set", Net: c.fd.net, Source: nil, Addr: c.fd.laddr, Err: err}
+		return &OpError{Op: "set", Net: c.fd.net, Source: c.fd.laddr, Err: err} // 包装错误
 	}
-	return nil
+	return nil // 返回 nil 表示成功
 }
 
 // File returns a copy of the underlying [os.File].
@@ -302,11 +302,11 @@ func (c *conn) SetWriteBuffer(bytes int) error {
 // Attempting to change properties of the original using this duplicate
 // may or may not have the desired effect.
 func (c *conn) File() (f *os.File, err error) {
-	f, err = c.fd.dup()
+	f, err = c.fd.dup() // 复制底层文件描述符
 	if err != nil {
-		err = &OpError{Op: "file", Net: c.fd.net, Source: c.fd.laddr, Addr: c.fd.raddr, Err: err}
+		err = &OpError{Op: "file", Net: c.fd.net, Source: c.fd.laddr, Addr: c.fd.raddr, Err: err} // 包装错误
 	}
-	return
+	return // 返回文件描述符和错误
 }
 
 // PacketConn is a generic packet-oriented network connection.
@@ -375,7 +375,7 @@ type PacketConn interface {
 
 var listenerBacklogCache struct {
 	sync.Once
-	val int
+	val int // 缓存的监听器 backlog 值
 }
 
 // listenerBacklog is a caching wrapper around maxListenerBacklog.
@@ -392,8 +392,8 @@ var listenerBacklogCache struct {
 //
 //go:linkname listenerBacklog
 func listenerBacklog() int {
-	listenerBacklogCache.Do(func() { listenerBacklogCache.val = maxListenerBacklog() })
-	return listenerBacklogCache.val
+	listenerBacklogCache.Do(func() { listenerBacklogCache.val = maxListenerBacklog() }) // 初始化缓存
+	return listenerBacklogCache.val                                                     // 返回缓存的值
 }
 
 // A Listener is a generic network listener for stream-oriented protocols.
@@ -401,58 +401,58 @@ func listenerBacklog() int {
 // Multiple goroutines may invoke methods on a Listener simultaneously.
 type Listener interface {
 	// Accept waits for and returns the next connection to the listener.
-	Accept() (Conn, error)
+	Accept() (Conn, error) // 等待并返回下一个连接
 
 	// Close closes the listener.
 	// Any blocked Accept operations will be unblocked and return errors.
-	Close() error
+	Close() error // 关闭监听器
 
 	// Addr returns the listener's network address.
-	Addr() Addr
+	Addr() Addr // 返回监听器的网络地址
 }
 
 // An Error represents a network error.
 type Error interface {
-	error
+	error          // 实现 error 接口
 	Timeout() bool // Is the error a timeout?
 
 	// Deprecated: Temporary errors are not well-defined.
 	// Most "temporary" errors are timeouts, and the few exceptions are surprising.
 	// Do not use this method.
-	Temporary() bool
+	Temporary() bool // 是否为临时错误
 }
 
 // Various errors contained in OpError.
 var (
 	// For connection setup operations.
-	errNoSuitableAddress = errors.New("no suitable address found")
+	errNoSuitableAddress = errors.New("no suitable address found") // 找不到合适的地址
 
 	// For connection setup and write operations.
-	errMissingAddress = errors.New("missing address")
+	errMissingAddress = errors.New("missing address") // 缺少地址
 
 	// For both read and write operations.
-	errCanceled         = canceledError{}
-	ErrWriteToConnected = errors.New("use of WriteTo with pre-connected connection")
+	errCanceled         = canceledError{}                                            // 操作被取消
+	ErrWriteToConnected = errors.New("use of WriteTo with pre-connected connection") // 使用 WriteTo 时连接已建立
 )
 
 // canceledError lets us return the same error string we have always
 // returned, while still being Is context.Canceled.
 type canceledError struct{}
 
-func (canceledError) Error() string { return "operation was canceled" }
+func (canceledError) Error() string { return "operation was canceled" } // 返回取消操作的错误信息
 
-func (canceledError) Is(err error) bool { return err == context.Canceled }
+func (canceledError) Is(err error) bool { return err == context.Canceled } // 判断是否为取消错误
 
 // mapErr maps from the context errors to the historical internal net
 // error values.
 func mapErr(err error) error {
 	switch err {
 	case context.Canceled:
-		return errCanceled
+		return errCanceled // 映射到取消错误
 	case context.DeadlineExceeded:
-		return errTimeout
+		return errTimeout // 映射到超时错误
 	default:
-		return err
+		return err // 返回原始错误
 	}
 }
 
@@ -462,16 +462,16 @@ func mapErr(err error) error {
 type OpError struct {
 	// Op is the operation which caused the error, such as
 	// "read" or "write".
-	Op string
+	Op string // 操作类型
 
 	// Net is the network type on which this error occurred,
 	// such as "tcp" or "udp6".
-	Net string
+	Net string // 网络类型
 
 	// For operations involving a remote network connection, like
 	// Dial, Read, or Write, Source is the corresponding local
 	// network address.
-	Source Addr
+	Source Addr // 本地地址
 
 	// Addr is the network address for which this error occurred.
 	// For local operations, like Listen or SetDeadline, Addr is
@@ -479,56 +479,56 @@ type OpError struct {
 	// For operations involving a remote network connection, like
 	// Dial, Read, or Write, Addr is the remote address of that
 	// connection.
-	Addr Addr
+	Addr Addr // 远程地址
 
 	// Err is the error that occurred during the operation.
 	// The Error method panics if the error is nil.
-	Err error
+	Err error // 原始错误
 }
 
-func (e *OpError) Unwrap() error { return e.Err }
+func (e *OpError) Unwrap() error { return e.Err } // 解包错误
 
 func (e *OpError) Error() string {
 	if e == nil {
-		return "<nil>"
+		return "<nil>" // 返回 nil
 	}
-	s := e.Op
+	s := e.Op // 获取操作类型
 	if e.Net != "" {
-		s += " " + e.Net
+		s += " " + e.Net // 添加网络类型
 	}
 	if e.Source != nil {
-		s += " " + e.Source.String()
+		s += " " + e.Source.String() // 添加本地地址
 	}
 	if e.Addr != nil {
 		if e.Source != nil {
-			s += "->"
+			s += "->" // 添加箭头分隔符
 		} else {
 			s += " "
 		}
-		s += e.Addr.String()
+		s += e.Addr.String() // 添加远程地址
 	}
-	s += ": " + e.Err.Error()
-	return s
+	s += ": " + e.Err.Error() // 添加原始错误信息
+	return s                  // 返回完整错误信息
 }
 
 var (
 	// aLongTimeAgo is a non-zero time, far in the past, used for
 	// immediate cancellation of dials.
-	aLongTimeAgo = time.Unix(1, 0)
+	aLongTimeAgo = time.Unix(1, 0) // 用于立即取消拨号的时间
 
 	// noDeadline and noCancel are just zero values for
 	// readability with functions taking too many parameters.
-	noDeadline = time.Time{}
-	noCancel   = (chan struct{})(nil)
+	noDeadline = time.Time{}          // 零值表示没有截止时间
+	noCancel   = (chan struct{})(nil) // 零值表示没有取消
 )
 
 type timeout interface {
-	Timeout() bool
+	Timeout() bool // 判断是否超时
 }
 
 func (e *OpError) Timeout() bool {
 	if ne, ok := e.Err.(*os.SyscallError); ok {
-		t, ok := ne.Err.(timeout)
+		t, ok := ne.Err.(timeout) // 判断是否为超时错误
 		return ok && t.Timeout()
 	}
 	t, ok := e.Err.(timeout)
@@ -536,14 +536,14 @@ func (e *OpError) Timeout() bool {
 }
 
 type temporary interface {
-	Temporary() bool
+	Temporary() bool // 判断是否为临时错误
 }
 
 func (e *OpError) Temporary() bool {
 	// Treat ECONNRESET and ECONNABORTED as temporary errors when
 	// they come from calling accept. See issue 6163.
 	if e.Op == "accept" && isConnError(e.Err) {
-		return true
+		return true // 将 accept 操作中的连接重置和中止视为临时错误
 	}
 
 	if ne, ok := e.Err.(*os.SyscallError); ok {
@@ -558,41 +558,41 @@ func (e *OpError) Temporary() bool {
 type ParseError struct {
 	// Type is the type of string that was expected, such as
 	// "IP address", "CIDR address".
-	Type string
+	Type string // 预期的字符串类型
 
 	// Text is the malformed text string.
-	Text string
+	Text string // 错误的文本字符串
 }
 
-func (e *ParseError) Error() string { return "invalid " + e.Type + ": " + e.Text }
+func (e *ParseError) Error() string { return "invalid " + e.Type + ": " + e.Text } // 返回解析错误信息
 
-func (e *ParseError) Timeout() bool   { return false }
-func (e *ParseError) Temporary() bool { return false }
+func (e *ParseError) Timeout() bool   { return false } // 解析错误不超时
+func (e *ParseError) Temporary() bool { return false } // 解析错误不是临时错误
 
 type AddrError struct {
-	Err  string
-	Addr string
+	Err  string // 错误信息
+	Addr string // 地址信息
 }
 
 func (e *AddrError) Error() string {
 	if e == nil {
-		return "<nil>"
+		return "<nil>" // 返回 nil
 	}
-	s := e.Err
+	s := e.Err // 获取错误信息
 	if e.Addr != "" {
-		s = "address " + e.Addr + ": " + s
+		s = "address " + e.Addr + ": " + s // 添加地址信息
 	}
-	return s
+	return s // 返回完整错误信息
 }
 
-func (e *AddrError) Timeout() bool   { return false }
-func (e *AddrError) Temporary() bool { return false }
+func (e *AddrError) Timeout() bool   { return false } // 地址错误不超时
+func (e *AddrError) Temporary() bool { return false } // 地址错误不是临时错误
 
 type UnknownNetworkError string
 
-func (e UnknownNetworkError) Error() string   { return "unknown network " + string(e) }
-func (e UnknownNetworkError) Timeout() bool   { return false }
-func (e UnknownNetworkError) Temporary() bool { return false }
+func (e UnknownNetworkError) Error() string   { return "unknown network " + string(e) } // 返回未知网络错误信息
+func (e UnknownNetworkError) Timeout() bool   { return false }                          // 未知网络错误不超时
+func (e UnknownNetworkError) Temporary() bool { return false }                          // 未知网络错误不是临时错误
 
 type InvalidAddrError string
 
@@ -724,27 +724,27 @@ func (e *DNSError) Timeout() bool { return e.IsTimeout }
 // Temporary reports whether the DNS error is known to be temporary.
 // This is not always known; a DNS lookup may fail due to a temporary
 // error and return a [DNSError] for which Temporary returns false.
-func (e *DNSError) Temporary() bool { return e.IsTimeout || e.IsTemporary }
+func (e *DNSError) Temporary() bool { return e.IsTimeout || e.IsTemporary } // 判断 DNS 错误是否为临时错误
 
 // errClosed exists just so that the docs for ErrClosed don't mention
 // the internal package poll.
-var errClosed = poll.ErrNetClosing
+var errClosed = poll.ErrNetClosing // 网络关闭错误
 
 // ErrClosed is the error returned by an I/O call on a network
 // connection that has already been closed, or that is closed by
 // another goroutine before the I/O is completed. This may be wrapped
 // in another error, and should normally be tested using
 // errors.Is(err, net.ErrClosed).
-var ErrClosed error = errClosed
+var ErrClosed error = errClosed // 网络连接关闭错误
 
 // noReadFrom can be embedded alongside another type to
 // hide the ReadFrom method of that other type.
-type noReadFrom struct{}
+type noReadFrom struct{} // 隐藏 ReadFrom 方法的类型
 
 // ReadFrom hides another ReadFrom method.
 // It should never be called.
 func (noReadFrom) ReadFrom(io.Reader) (int64, error) {
-	panic("can't happen")
+	panic("can't happen") // 不应被调用
 }
 
 // tcpConnWithoutReadFrom implements all the methods of *TCPConn other
@@ -752,24 +752,24 @@ func (noReadFrom) ReadFrom(io.Reader) (int64, error) {
 // without leading to a recursive call to ReadFrom.
 type tcpConnWithoutReadFrom struct {
 	noReadFrom
-	*TCPConn
+	*TCPConn // TCP 连接
 }
 
 // Fallback implementation of io.ReaderFrom's ReadFrom, when sendfile isn't
 // applicable.
 func genericReadFrom(c *TCPConn, r io.Reader) (n int64, err error) {
 	// Use wrapper to hide existing r.ReadFrom from io.Copy.
-	return io.Copy(tcpConnWithoutReadFrom{TCPConn: c}, r)
+	return io.Copy(tcpConnWithoutReadFrom{TCPConn: c}, r) // 从 Reader 复制数据到 TCP 连接
 }
 
 // noWriteTo can be embedded alongside another type to
 // hide the WriteTo method of that other type.
-type noWriteTo struct{}
+type noWriteTo struct{} // 隐藏 WriteTo 方法的类型
 
 // WriteTo hides another WriteTo method.
 // It should never be called.
 func (noWriteTo) WriteTo(io.Writer) (int64, error) {
-	panic("can't happen")
+	panic("can't happen") // 不应被调用
 }
 
 // tcpConnWithoutWriteTo implements all the methods of *TCPConn other
@@ -777,13 +777,13 @@ func (noWriteTo) WriteTo(io.Writer) (int64, error) {
 // without leading to a recursive call to WriteTo.
 type tcpConnWithoutWriteTo struct {
 	noWriteTo
-	*TCPConn
+	*TCPConn // TCP 连接
 }
 
 // Fallback implementation of io.WriterTo's WriteTo, when zero-copy isn't applicable.
 func genericWriteTo(c *TCPConn, w io.Writer) (n int64, err error) {
 	// Use wrapper to hide existing w.WriteTo from io.Copy.
-	return io.Copy(w, tcpConnWithoutWriteTo{TCPConn: c})
+	return io.Copy(w, tcpConnWithoutWriteTo{TCPConn: c}) // 从 TCP 连接写入数据到 Writer
 }
 
 // Limit the number of concurrent cgo-using goroutines, because
@@ -792,24 +792,24 @@ func genericWriteTo(c *TCPConn, w io.Writer) (n int64, err error) {
 // server is not responding. Then the many lookups each use a different
 // thread, and the system or the program runs out of threads.
 
-var threadLimit chan struct{}
+var threadLimit chan struct{} // 限制并发使用 cgo 的 goroutine 数量
 
-var threadOnce sync.Once
+var threadOnce sync.Once // 确保线程限制只初始化一次
 
 func acquireThread(ctx context.Context) error {
 	threadOnce.Do(func() {
-		threadLimit = make(chan struct{}, concurrentThreadsLimit())
+		threadLimit = make(chan struct{}, concurrentThreadsLimit()) // 初始化线程限制通道
 	})
 	select {
-	case threadLimit <- struct{}{}:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
+	case threadLimit <- struct{}{}: // 尝试获取一个线程
+		return nil // 成功获取
+	case <-ctx.Done(): // 上下文取消
+		return ctx.Err() // 返回上下文错误
 	}
 }
 
 func releaseThread() {
-	<-threadLimit
+	<-threadLimit // 释放一个线程
 }
 
 // buffersWriter is the interface implemented by Conns that support a
@@ -817,7 +817,7 @@ func releaseThread() {
 // writeBuffers should fully consume and write all chunks from the
 // provided Buffers, else it should report a non-nil error.
 type buffersWriter interface {
-	writeBuffers(*Buffers) (int64, error)
+	writeBuffers(*Buffers) (int64, error) // 批量写入缓冲区
 }
 
 // Buffers contains zero or more runs of bytes to write.
@@ -825,11 +825,11 @@ type buffersWriter interface {
 // On certain machines, for certain types of connections, this is
 // optimized into an OS-specific batch write operation (such as
 // "writev").
-type Buffers [][]byte
+type Buffers [][]byte // 字节缓冲区
 
 var (
-	_ io.WriterTo = (*Buffers)(nil)
-	_ io.Reader   = (*Buffers)(nil)
+	_ io.WriterTo = (*Buffers)(nil) // 确保 Buffers 实现了 io.WriterTo 接口
+	_ io.Reader   = (*Buffers)(nil) // 确保 Buffers 实现了 io.Reader 接口
 )
 
 // WriteTo writes contents of the buffers to w.
@@ -840,18 +840,18 @@ var (
 // but does not modify v[i][j] for any i, j.
 func (v *Buffers) WriteTo(w io.Writer) (n int64, err error) {
 	if wv, ok := w.(buffersWriter); ok {
-		return wv.writeBuffers(v)
+		return wv.writeBuffers(v) // 使用批量写入
 	}
 	for _, b := range *v {
-		nb, err := w.Write(b)
-		n += int64(nb)
+		nb, err := w.Write(b) // 写入每个缓冲区
+		n += int64(nb)        // 累加写入的字节数
 		if err != nil {
-			v.consume(n)
-			return n, err
+			v.consume(n)  // 消费已写入的字节
+			return n, err // 返回已写入的字节数和错误
 		}
 	}
-	v.consume(n)
-	return n, nil
+	v.consume(n)  // 消费所有已写入的字节
+	return n, nil // 返回已写入的字节数
 }
 
 // Read from the buffers.
@@ -862,26 +862,26 @@ func (v *Buffers) WriteTo(w io.Writer) (n int64, err error) {
 // but does not modify v[i][j] for any i, j.
 func (v *Buffers) Read(p []byte) (n int, err error) {
 	for len(p) > 0 && len(*v) > 0 {
-		n0 := copy(p, (*v)[0])
-		v.consume(int64(n0))
-		p = p[n0:]
-		n += n0
+		n0 := copy(p, (*v)[0]) // 从缓冲区复制数据到 p
+		v.consume(int64(n0))   // 消费已读取的字节
+		p = p[n0:]             // 更新 p
+		n += n0                // 累加读取的字节数
 	}
 	if len(*v) == 0 {
-		err = io.EOF
+		err = io.EOF // 如果缓冲区为空，返回 EOF
 	}
-	return
+	return // 返回读取的字节数和错误
 }
 
 func (v *Buffers) consume(n int64) {
 	for len(*v) > 0 {
-		ln0 := int64(len((*v)[0]))
+		ln0 := int64(len((*v)[0])) // 获取当前缓冲区的长度
 		if ln0 > n {
-			(*v)[0] = (*v)[0][n:]
-			return
+			(*v)[0] = (*v)[0][n:] // 更新当前缓冲区
+			return                // 返回
 		}
-		n -= ln0
-		(*v)[0] = nil
-		*v = (*v)[1:]
+		n -= ln0      // 减去已消费的字节数
+		(*v)[0] = nil // 清空当前缓冲区
+		*v = (*v)[1:] // 移除当前缓冲区
 	}
 }

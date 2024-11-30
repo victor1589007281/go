@@ -27,6 +27,7 @@ netpoll (delay int64) (gList, int32)(src/runtime/netpoll_epoll.go)
 ## events关联
 注册的时候，会序列化 pollDesc 的指针和标记，返回的时候反序列化
 注册fd的时候，把pollDesc的信息存到epoll中
+ev.data 中是就绪的网络 socket 的文件描述符。根据网络就绪 fd 拿到 pollDesc
 ```text
 注册时:
 pollDesc ──序列化──> epoll event data

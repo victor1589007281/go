@@ -597,13 +597,20 @@ func netpollgoready(gp *g, traceskip int) {
 // waitio - wait only for completed IO, ignore errors
 // Concurrent calls to netpollblock in the same mode are forbidden, as pollDesc
 // can hold only a single waiting goroutine for each mode.
+//
+// netpollblock 阻塞当前 goroutine 直到 I/O 就绪或超时/关闭
+// - 如果 I/O 就绪返回 true
+// - 如果超时或关闭返回 false
+// - waitio 参数表示是否只等待 I/O 完成而忽略错误
+// - 同一模式下禁止并发调用，因为每个模式只能有一个等待的 goroutine
 func netpollblock(pd *pollDesc, mode int32, waitio bool) bool {
+	// 选择读或写等待组
 	gpp := &pd.rg
 	if mode == 'w' {
 		gpp = &pd.wg
 	}
 
-	// set the gpp semaphore to pdWait
+	// 设置等待组状态为 pdWait
 	for {
 		// Consume notification if already ready.
 		if gpp.CompareAndSwap(pdReady, pdNil) {
@@ -624,9 +631,11 @@ func netpollblock(pd *pollDesc, mode int32, waitio bool) bool {
 	// this is necessary because runtime_pollUnblock/runtime_pollSetDeadline/deadlineimpl
 	// do the opposite: store to closing/rd/wd, publishInfo, load of rg/wg
 	if waitio || netpollcheckerr(pd, mode) == pollNoError {
+		// 将当前 goroutine 置于等待状态
 		gopark(netpollblockcommit, unsafe.Pointer(gpp), waitReasonIOWait, traceBlockNet, 5)
 	}
-	// be careful to not lose concurrent pdReady notification
+
+	// 恢复为空闲状态，并检查是否有就绪通知
 	old := gpp.Swap(pdNil)
 	if old > pdWait {
 		throw("runtime: corrupted polldesc")

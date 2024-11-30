@@ -1656,50 +1656,76 @@ func stopTheWorldWithSema(reason stwReason) worldStop {
 // now is the current time; prefer to pass 0 to capture a fresh timestamp.
 //
 // stattTheWorldWithSema returns now.
+//
+// startTheWorldWithSema 重新启动被 STW（Stop The World）暂停的程序
+// 参数：
+// - now: 当前时间戳（传0则获取新时间戳）
+// - w: STW 的相关信息
 func startTheWorldWithSema(now int64, w worldStop) int64 {
+	// 确保当前确实处于 STW 状态
 	assertWorldStopped()
 
-	mp := acquirem() // disable preemption because it can be holding p in a local var
+	// 禁用当前 M 的抢占，因为可能在局部变量中持有 P
+	mp := acquirem()
+
+	// 检查并处理网络轮询器中的就绪事件
 	if netpollinited() {
-		list, delta := netpoll(0) // non-blocking
+		// 非阻塞地检查网络事件
+		list, delta := netpoll(0)
+		// 将就绪的 goroutine 注入调度器
 		injectglist(&list)
+		// 调整等待计数
 		netpollAdjustWaiters(delta)
 	}
+
+	// 获取调度器锁，准备调整 P 的数量
 	lock(&sched.lock)
 
+	// 处理 GOMAXPROCS 的调整请求
 	procs := gomaxprocs
 	if newprocs != 0 {
 		procs = newprocs
 		newprocs = 0
 	}
+	// 调整 P 的数量
 	p1 := procresize(procs)
+
+	// 清除 GC 等待标志
 	sched.gcwaiting.Store(false)
+
+	// 唤醒系统监控 goroutine（如果它在等待）
 	if sched.sysmonwait.Load() {
 		sched.sysmonwait.Store(false)
 		notewakeup(&sched.sysmonnote)
 	}
 	unlock(&sched.lock)
 
+	// 通知世界已经开始运行
 	worldStarted()
 
+	// 处理所有需要启动的 P
 	for p1 != nil {
 		p := p1
 		p1 = p1.link.ptr()
 		if p.m != 0 {
+			// P 已经有关联的 M
 			mp := p.m.ptr()
 			p.m = 0
 			if mp.nextp != 0 {
 				throw("startTheWorld: inconsistent mp->nextp")
 			}
+			// 设置 M 的下一个 P 并唤醒 M
 			mp.nextp.set(p)
 			notewakeup(&mp.park)
 		} else {
 			// Start M to run P.  Do not start another M below.
+			// P 没有关联的 M，创建新的 M 来运行它
 			newm(nil, p, -1)
 		}
 	}
 
 	// Capture start-the-world time before doing clean-up tasks.
+	// 记录 STW 的时间统计
 	if now == 0 {
 		now = nanotime()
 	}
@@ -1709,6 +1735,8 @@ func startTheWorldWithSema(now int64, w worldStop) int64 {
 	} else {
 		sched.stwTotalTimeOther.record(totalTime)
 	}
+
+	// 记录跟踪信息
 	trace := traceAcquire()
 	if trace.ok() {
 		trace.STWDone()
@@ -1718,8 +1746,11 @@ func startTheWorldWithSema(now int64, w worldStop) int64 {
 	// Wakeup an additional proc in case we have excessive runnable goroutines
 	// in local queues or in the global queue. If we don't, the proc will park itself.
 	// If we have lots of excessive work, resetspinning will unpark additional procs as necessary.
+	// 唤醒额外的 P 处理可能的过量任务
+	// 如果没有过量任务，P 会自行休眠
 	wakep()
 
+	// 恢复当前 M 的抢占
 	releasem(mp)
 
 	return now
@@ -3246,30 +3277,42 @@ func execute(gp *g, inheritTime bool) {
 // Tries to steal from other P's, get g from local or global queue, poll network.
 // tryWakeP indicates that the returned goroutine is not normal (GC worker, trace
 // reader) so the caller should try to wake a P.
+//
+// findRunnable 寻找一个可运行的 goroutine
+// 尝试从其他 P 偷取、从本地或全局队列获取、轮询网络
+// tryWakeP 表示返回的 goroutine 不是普通的（如 GC worker、trace reader），
+// 调用者应该尝试唤醒一个 P
 func findRunnable() (gp *g, inheritTime, tryWakeP bool) {
 	mp := getg().m
 
 	// The conditions here and in handoffp must agree: if
-	// findrunnable would return a G to run, handoffp must start
-	// an M.
+	// findrunnable would return a G to run, handoffp must start an M.
+	//
+	// 这里的条件必须与 handoffp 中的一致：
+	// 如果 findrunnable 会返回一个可运行的 G，handoffp 必须启动一个 M
 
 top:
 	pp := mp.p.ptr()
+
+	// 检查是否需要停止运行（GC 等待）
 	if sched.gcwaiting.Load() {
 		gcstopm()
 		goto top
 	}
+
+	// 运行安全点函数（如果有）
 	if pp.runSafePointFn != 0 {
 		runSafePointFn()
 	}
 
 	// now and pollUntil are saved for work stealing later,
 	// which may steal timers. It's important that between now
-	// and then, nothing blocks, so these numbers remain mostly
-	// relevant.
+	// and then, nothing blocks, so these numbers remain mostly relevant.
+	//
+	// 检查定时器，获取当前时间和下一个定时器触发时间
 	now, pollUntil, _ := pp.timers.check(0)
 
-	// Try to schedule the trace reader.
+	// 尝试调度 trace reader
 	if traceEnabled() || traceShuttingDown() {
 		gp := traceReader()
 		if gp != nil {
@@ -3283,7 +3326,7 @@ top:
 		}
 	}
 
-	// Try to schedule a GC worker.
+	// 尝试调度 GC worker
 	if gcBlackenEnabled != 0 {
 		gp, tnow := gcController.findRunnableGCWorker(pp, now)
 		if gp != nil {
@@ -3295,6 +3338,8 @@ top:
 	// Check the global runnable queue once in a while to ensure fairness.
 	// Otherwise two goroutines can completely occupy the local runqueue
 	// by constantly respawning each other.
+	//
+	// 偶尔检查全局运行队列以确保公平性
 	if pp.schedtick%61 == 0 && sched.runqsize > 0 {
 		lock(&sched.lock)
 		gp := globrunqget(pp, 1)
@@ -3304,22 +3349,24 @@ top:
 		}
 	}
 
-	// Wake up the finalizer G.
+	// 唤醒 finalizer goroutine（如果需要）
 	if fingStatus.Load()&(fingWait|fingWake) == fingWait|fingWake {
 		if gp := wakefing(); gp != nil {
 			ready(gp, 0, true)
 		}
 	}
+
+	// 执行 cgo 让出
 	if *cgo_yield != nil {
 		asmcgocall(*cgo_yield, nil)
 	}
 
-	// local runq
+	// 从本地运行队列获取
 	if gp, inheritTime := runqget(pp); gp != nil {
 		return gp, inheritTime, false
 	}
 
-	// global runq
+	// 从全局运行队列获取
 	if sched.runqsize != 0 {
 		lock(&sched.lock)
 		gp := globrunqget(pp, 0)
@@ -3332,12 +3379,12 @@ top:
 	// Poll network.
 	// This netpoll is only an optimization before we resort to stealing.
 	// We can safely skip it if there are no waiters or a thread is blocked
-	// in netpoll already. If there is any kind of logical race with that
-	// blocked thread (e.g. it has already returned from netpoll, but does
-	// not set lastpoll yet), this thread will do blocking netpoll below
-	// anyway.
+	// in netpoll already...
+	//
+	// 检查网络 I/O
+	// 这是在尝试偷取工作之前的一个优化
 	if netpollinited() && netpollAnyWaiters() && sched.lastpoll.Load() != 0 {
-		if list, delta := netpoll(0); !list.empty() { // non-blocking
+		if list, delta := netpoll(0); !list.empty() { // 非阻塞检查
 			gp := list.pop()
 			injectglist(&list)
 			netpollAdjustWaiters(delta)
@@ -3356,6 +3403,7 @@ top:
 	// Limit the number of spinning Ms to half the number of busy Ps.
 	// This is necessary to prevent excessive CPU consumption when
 	// GOMAXPROCS>>1 but the program parallelism is low.
+	// 自旋的 M：从其他 P 偷取工作
 	if mp.spinning || 2*sched.nmspinning.Load() < gomaxprocs-sched.npidle.Load() {
 		if !mp.spinning {
 			mp.becomeSpinning()
@@ -3363,18 +3411,14 @@ top:
 
 		gp, inheritTime, tnow, w, newWork := stealWork(now)
 		if gp != nil {
-			// Successfully stole.
 			return gp, inheritTime, false
 		}
 		if newWork {
-			// There may be new timer or GC work; restart to
-			// discover.
 			goto top
 		}
 
 		now = tnow
 		if w != 0 && (pollUntil == 0 || w < pollUntil) {
-			// Earlier timer to wait for.
 			pollUntil = w
 		}
 	}
@@ -3383,6 +3427,9 @@ top:
 	//
 	// If we're in the GC mark phase, can safely scan and blacken objects,
 	// and have work to do, run idle-time marking rather than give up the P.
+	//
+	// 如果没有其他工作要做，且处于 GC 标记阶段，
+	// 可以安全地扫描和标记对象，执行空闲时间标记而不是放弃 P
 	if gcBlackenEnabled != 0 && gcMarkWorkAvailable(pp) && gcController.addIdleMarkWorker() {
 		node := (*gcBgMarkWorkerNode)(gcBgMarkWorkerPool.pop())
 		if node != nil {
@@ -3404,6 +3451,8 @@ top:
 	// If a callback returned and no other goroutine is awake,
 	// then wake event handler goroutine which pauses execution
 	// until a callback was triggered.
+	//
+	// wasm 专用：检查是否需要唤醒事件处理 goroutine
 	gp, otherReady := beforeIdle(now, pollUntil)
 	if gp != nil {
 		trace := traceAcquire()
@@ -3420,15 +3469,20 @@ top:
 
 	// Before we drop our P, make a snapshot of the allp slice,
 	// which can change underfoot once we no longer block
-	// safe-points. We don't need to snapshot the contents because
-	// everything up to cap(allp) is immutable.
+	// safe-points...
+	//
+	// 在放弃 P 之前，获取 allp 切片的快照
+	// 因为一旦不再阻塞安全点，allp 可能会发生变化
 	allpSnapshot := allp
 	// Also snapshot masks. Value changes are OK, but we can't allow
 	// len to change out from under us.
+	//
+	// 同时获取掩码的快照
 	idlepMaskSnapshot := idlepMask
 	timerpMaskSnapshot := timerpMask
 
 	// return P and block
+	// 准备放弃 P 并阻塞
 	lock(&sched.lock)
 	if sched.gcwaiting.Load() || pp.runSafePointFn != 0 {
 		unlock(&sched.lock)
@@ -3487,6 +3541,8 @@ top:
 	//
 	// Also see "Worker thread parking/unparking" comment at the top of the
 	// file.
+	// 微妙的过程：线程从自旋状态转换到非自旋状态
+	// 可能与新工作的提交并发进行
 	wasSpinning := mp.spinning
 	if mp.spinning {
 		mp.spinning = false
@@ -3505,6 +3561,7 @@ top:
 
 		// Check global and P runqueues again.
 
+		// 重新检查是否有工作可做
 		lock(&sched.lock)
 		if sched.runqsize != 0 {
 			pp, _ := pidlegetSpinning(0)
@@ -3521,6 +3578,7 @@ top:
 		}
 		unlock(&sched.lock)
 
+		// 检查所有 P 的运行队列
 		pp := checkRunqsNoP(allpSnapshot, idlepMaskSnapshot)
 		if pp != nil {
 			acquirep(pp)
@@ -3528,13 +3586,11 @@ top:
 			goto top
 		}
 
-		// Check for idle-priority GC work again.
+		// 再次检查空闲优先级的 GC 工作
 		pp, gp := checkIdleGCNoP()
 		if pp != nil {
 			acquirep(pp)
 			mp.becomeSpinning()
-
-			// Run the idle worker.
 			pp.gcMarkWorkerMode = gcMarkWorkerIdleMode
 			trace := traceAcquire()
 			casgstatus(gp, _Gwaiting, _Grunnable)
@@ -3551,10 +3607,12 @@ top:
 		// Note that we cannot use checkTimers here because it calls
 		// adjusttimers which may need to allocate memory, and that isn't
 		// allowed when we don't have an active P.
+		// 最后检查定时器的创建或到期
 		pollUntil = checkTimersNoP(allpSnapshot, timerpMaskSnapshot, pollUntil)
 	}
 
 	// Poll network until next timer.
+	// 进行网络轮询直到下一个定时器触发
 	if netpollinited() && (netpollAnyWaiters() || pollUntil != 0) && sched.lastpoll.Swap(0) != 0 {
 		sched.pollUntil.Store(pollUntil)
 		if mp.p != 0 {
@@ -3563,6 +3621,8 @@ top:
 		if mp.spinning {
 			throw("findrunnable: netpoll with spinning")
 		}
+
+		// 计算等待时间
 		delay := int64(-1)
 		if pollUntil != 0 {
 			if now == 0 {
@@ -3574,17 +3634,17 @@ top:
 			}
 		}
 		if faketime != 0 {
-			// When using fake time, just poll.
 			delay = 0
 		}
+
+		// 阻塞式网络轮询
 		list, delta := netpoll(delay) // block until new work is available
-		// Refresh now again, after potentially blocking.
 		now = nanotime()
 		sched.pollUntil.Store(0)
 		sched.lastpoll.Store(now)
+
+		// 处理轮询结果
 		if faketime != 0 && list.empty() {
-			// Using fake time and nothing is ready; stop M.
-			// When all M's stop, checkdead will call timejump.
 			stopm()
 			goto top
 		}
@@ -3619,6 +3679,8 @@ top:
 			netpollBreak()
 		}
 	}
+
+	// 没有工作可做，停止当前 M
 	stopm()
 	goto top
 }
@@ -3627,21 +3689,37 @@ top:
 // be doing. This is a fairly lightweight check to be used for
 // background work loops, like idle GC. It checks a subset of the
 // conditions checked by the actual scheduler.
+//
+// pollWork 检查当前 P 是否有非后台工作可以执行
+// 这是一个相对轻量的检查，适用于后台工作循环，如空闲 GC
+// 它检查的条件是实际调度器检查条件的一个子集
 func pollWork() bool {
+	// 检查全局运行队列是否有任务
 	if sched.runqsize != 0 {
-		return true
+		return true // 有任务可执行
 	}
+
+	// 获取当前 goroutine 所在的 P
 	p := getg().m.p.ptr()
+
+	// 检查本地运行队列是否为空
 	if !runqempty(p) {
-		return true
+		return true // 本地队列有任务可执行
 	}
+
+	// 检查网络轮询器是否已初始化且有等待的任务
 	if netpollinited() && netpollAnyWaiters() && sched.lastpoll.Load() != 0 {
+		// 非阻塞地检查网络事件
 		if list, delta := netpoll(0); !list.empty() {
+			// 将就绪的 goroutine 注入到调度器
 			injectglist(&list)
+			// 调整等待者计数
 			netpollAdjustWaiters(delta)
-			return true
+			return true // 有网络任务可执行
 		}
 	}
+
+	// 没有可执行的工作
 	return false
 }
 
@@ -6039,27 +6117,30 @@ const haveSysmon = GOARCH != "wasm"
 
 // Always runs without a P, so write barriers are not allowed.
 //
+// sysmon 是系统监控的主循环，负责管理空闲状态下的工作
+//
 //go:nowritebarrierrec
 func sysmon() {
 	lock(&sched.lock)
-	sched.nmsys++
-	checkdead()
+	sched.nmsys++ // 增加系统监控 M 的计数
+	checkdead()   // 检查是否有死锁情况
 	unlock(&sched.lock)
 
-	lasttrace := int64(0)
-	idle := 0 // how many cycles in succession we had not wokeup somebody
-	delay := uint32(0)
+	lasttrace := int64(0) // 上次跟踪的时间
+	idle := 0             // 连续未唤醒任何 goroutine 的周期数
+	delay := uint32(0)    // 睡眠延迟时间
 
 	for {
-		if idle == 0 { // start with 20us sleep...
+		// 根据空闲周期调整睡眠时间
+		if idle == 0 { // 初始睡眠 20 微秒
 			delay = 20
-		} else if idle > 50 { // start doubling the sleep after 1ms...
+		} else if idle > 50 { // 超过 50 次空闲后开始加倍睡眠时间
 			delay *= 2
 		}
-		if delay > 10*1000 { // up to 10ms
+		if delay > 10*1000 { // 最大睡眠时间为 10 毫秒
 			delay = 10 * 1000
 		}
-		usleep(delay)
+		usleep(delay) // 进行睡眠
 
 		// sysmon should not enter deep sleep if schedtrace is enabled so that
 		// it can print that information at the right time.
@@ -6076,55 +6157,60 @@ func sysmon() {
 		// application starts work again. It does not reset idle when waking
 		// from a timer to avoid adding system load to applications that spend
 		// most of their time sleeping.
+		// sysmon 不应进入深度睡眠，如果启用了调度跟踪
+		// 以便在正确的时间打印信息
+		//
+		// 如果有任何活动的 P，sysmon 也不应进入深度睡眠
+		// 以便能够从系统调用中重新获取 P，抢占长时间运行的 G，
+		// 并在所有 P 长时间忙碌时轮询网络
 		now := nanotime()
 		if debug.schedtrace <= 0 && (sched.gcwaiting.Load() || sched.npidle.Load() == gomaxprocs) {
 			lock(&sched.lock)
 			if sched.gcwaiting.Load() || sched.npidle.Load() == gomaxprocs {
 				syscallWake := false
-				next := timeSleepUntil()
+				next := timeSleepUntil() // 获取下一个唤醒时间
 				if next > now {
-					sched.sysmonwait.Store(true)
+					sched.sysmonwait.Store(true) // 标记 sysmon 正在等待
 					unlock(&sched.lock)
-					// Make wake-up period small enough
-					// for the sampling to be correct.
+					// 确保唤醒周期足够小以便采样正确
 					sleep := forcegcperiod / 2
 					if next-now < sleep {
 						sleep = next - now
 					}
 					shouldRelax := sleep >= osRelaxMinNS
 					if shouldRelax {
-						osRelax(true)
+						osRelax(true) // 进入放松模式
 					}
-					syscallWake = notetsleep(&sched.sysmonnote, sleep)
+					syscallWake = notetsleep(&sched.sysmonnote, sleep) // 等待唤醒
 					if shouldRelax {
-						osRelax(false)
+						osRelax(false) // 退出放松模式
 					}
 					lock(&sched.lock)
-					sched.sysmonwait.Store(false)
-					noteclear(&sched.sysmonnote)
+					sched.sysmonwait.Store(false) // 重置等待标志
+					noteclear(&sched.sysmonnote)  // 清除通知
 				}
 				if syscallWake {
-					idle = 0
-					delay = 20
+					idle = 0   // 重置空闲计数
+					delay = 20 // 重置延迟
 				}
 			}
 			unlock(&sched.lock)
 		}
 
 		lock(&sched.sysmonlock)
-		// Update now in case we blocked on sysmonnote or spent a long time
-		// blocked on schedlock or sysmonlock above.
+		// 更新当前时间，以防在 sysmonnote 上阻塞或在 schedlock 或 sysmonlock 上长时间阻塞
 		now = nanotime()
 
-		// trigger libc interceptors if needed
+		// 如果需要，触发 libc 拦截器
 		if *cgo_yield != nil {
 			asmcgocall(*cgo_yield, nil)
 		}
-		// poll network if not polled for more than 10ms
+
+		// 如果超过 10 毫秒未轮询网络，则进行网络轮询
 		lastpoll := sched.lastpoll.Load()
 		if netpollinited() && lastpoll != 0 && lastpoll+10*1000*1000 < now {
 			sched.lastpoll.CompareAndSwap(lastpoll, now)
-			list, delta := netpoll(0) // non-blocking - returns list of goroutines
+			list, delta := netpoll(0) // 非阻塞 - 返回就绪的 goroutine 列表
 			if !list.empty() {
 				// Need to decrement number of idle locked M's
 				// (pretending that one more is running) before injectglist.
@@ -6133,12 +6219,15 @@ func sysmon() {
 				// another M returns from syscall, finishes running its G,
 				// observes that there is no work to do and no other running M's
 				// and reports deadlock.
+				// 在注入列表之前减少空闲锁定 M 的数量
 				incidlelocked(-1)
-				injectglist(&list)
+				injectglist(&list) // 注入就绪的 goroutine
 				incidlelocked(1)
-				netpollAdjustWaiters(delta)
+				netpollAdjustWaiters(delta) // 调整等待者计数
 			}
 		}
+
+		// NetBSD 特殊处理
 		if GOOS == "netbsd" && needSysmonWorkaround {
 			// netpoll is responsible for waiting for timer
 			// expiration, so we typically don't have to worry
@@ -6155,33 +6244,40 @@ func sysmon() {
 			//
 			// See issue 42515 and
 			// https://gnats.netbsd.org/cgi-bin/query-pr-single.pl?number=50094.
+			// NetBSD 有内核 bug，可能会错过 netpollBreak 的唤醒
+			// 如果检测到超时，则启动 M 来处理定时器
 			if next := timeSleepUntil(); next < now {
 				startm(nil, false, false)
 			}
 		}
+
+		// 唤醒 scavenger（如果需要）
 		if scavenger.sysmonWake.Load() != 0 {
-			// Kick the scavenger awake if someone requested it.
 			scavenger.wake()
 		}
-		// retake P's blocked in syscalls
-		// and preempt long running G's
+
+		// 重新获取被系统调用阻塞的 P
+		// 并抢占长时间运行的 G
 		if retake(now) != 0 {
-			idle = 0
+			idle = 0 // 重置空闲计数
 		} else {
-			idle++
+			idle++ // 增加空闲计数
 		}
-		// check if we need to force a GC
+
+		// 检查是否需要强制 GC
 		if t := (gcTrigger{kind: gcTriggerTime, now: now}); t.test() && forcegc.idle.Load() {
 			lock(&forcegc.lock)
-			forcegc.idle.Store(false)
+			forcegc.idle.Store(false) // 标记为非空闲
 			var list gList
-			list.push(forcegc.g)
-			injectglist(&list)
+			list.push(forcegc.g) // 将强制 GC 的 goroutine 加入列表
+			injectglist(&list)   // 注入列表
 			unlock(&forcegc.lock)
 		}
+
+		// 检查调度跟踪
 		if debug.schedtrace > 0 && lasttrace+int64(debug.schedtrace)*1000000 <= now {
 			lasttrace = now
-			schedtrace(debug.scheddetail > 0)
+			schedtrace(debug.scheddetail > 0) // 记录调度跟踪信息
 		}
 		unlock(&sched.sysmonlock)
 	}

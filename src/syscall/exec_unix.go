@@ -107,6 +107,7 @@ func CloseOnExec(fd int) { fcntl(fd, F_SETFD, FD_CLOEXEC) }
 // 参数：
 // - fd: 要设置的文件描述符
 // - nonblocking: true 表示设置为非阻塞模式，false 表示设置为阻塞模式
+// 非堵塞模式：如果没有新连接，马上返回，不会再内核层堵塞。epoll要求注册的socket必须设置为非阻塞模式
 func SetNonblock(fd int, nonblocking bool) (err error) {
 	// 获取文件描述符当前的标志
 	// F_GETFL: 获取文件状态标志

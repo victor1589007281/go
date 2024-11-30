@@ -151,29 +151,40 @@ func netpollBreak() {
 // delay < 0: blocks indefinitely
 // delay == 0: does not block, just polls
 // delay > 0: block for up to that many nanoseconds
+//
+// netpoll 检查就绪的网络连接
+// 返回变为可运行状态的 goroutine 列表
 func netpoll(delay int64) (gList, int32) {
+	// 检查 epoll 实例是否已初始化
 	if epfd == -1 {
 		return gList{}, 0
 	}
+
+	// 将纳秒级延迟转换为毫秒
 	var waitms int32
 	if delay < 0 {
-		waitms = -1
+		waitms = -1 // 永久阻塞
 	} else if delay == 0 {
-		waitms = 0
+		waitms = 0 // 非阻塞轮询
 	} else if delay < 1e6 {
-		waitms = 1
+		waitms = 1 // 小于1ms，至少等待1ms
 	} else if delay < 1e15 {
-		waitms = int32(delay / 1e6)
+		waitms = int32(delay / 1e6) // 转换为毫秒
 	} else {
 		// An arbitrary cap on how long to wait for a timer.
 		// 1e9 ms == ~11.5 days.
-		waitms = 1e9
+		waitms = 1e9 // 最大等待时间约11.5天
 	}
+
+	// 事件缓冲区
 	var events [128]syscall.EpollEvent
+
 retry:
+	// 调用 epoll_wait 等待事件
 	n, errno := syscall.EpollWait(epfd, events[:], int32(len(events)), waitms)
 	if errno != 0 {
 		if errno != _EINTR {
+			// 发生严重错误
 			println("runtime: epollwait on fd", epfd, "failed with", errno)
 			throw("runtime: netpoll failed")
 		}
@@ -184,14 +195,19 @@ retry:
 		}
 		goto retry
 	}
+
+	// 准备返回的可运行 goroutine 列表
 	var toRun gList
 	delta := int32(0)
+
+	// 处理所有就绪的事件
 	for i := int32(0); i < n; i++ {
 		ev := events[i]
 		if ev.Events == 0 {
 			continue
 		}
 
+		// 处理 eventfd 的特殊情况
 		if *(**uintptr)(unsafe.Pointer(&ev.Data)) == &netpollEventFd {
 			if ev.Events != syscall.EPOLLIN {
 				println("runtime: netpoll: eventfd ready for", ev.Events)
@@ -203,6 +219,7 @@ retry:
 				// integer if blocking.
 				// Since EFD_SEMAPHORE was not specified,
 				// the eventfd counter will be reset to 0.
+				// 读取并清除 eventfd 的计数
 				var one uint64
 				read(int32(netpollEventFd), noescape(unsafe.Pointer(&one)), int32(unsafe.Sizeof(one)))
 				netpollWakeSig.Store(0)
@@ -210,22 +227,57 @@ retry:
 			continue
 		}
 
+		// 确定就绪的事件类型（读/写）
 		var mode int32
 		if ev.Events&(syscall.EPOLLIN|syscall.EPOLLRDHUP|syscall.EPOLLHUP|syscall.EPOLLERR) != 0 {
-			mode += 'r'
+			mode += 'r' // 可读事件
 		}
 		if ev.Events&(syscall.EPOLLOUT|syscall.EPOLLHUP|syscall.EPOLLERR) != 0 {
-			mode += 'w'
+			mode += 'w' // 可写事件
 		}
+
+		// 如果有事件就绪，唤醒对应的 goroutine
 		if mode != 0 {
-			tp := *(*taggedPointer)(unsafe.Pointer(&ev.Data))
+
+			/*
+							// 1. 注册阶段
+				ev := syscall.EpollEvent{
+				    Events: syscall.EPOLLIN,
+				    Data: {
+				        // 存储 pollDesc 指针和序列号
+				        ptr: &pd,        // pollDesc 指针
+				        tag: fdseq      // 文件描述符序列号
+				    }
+				}
+			*/
+			// 从 epoll 事件中解析出 pollDesc 和标记信息
+			tp := *(*taggedPointer)(unsafe.Pointer(&ev.Data)) // ev.Data 包含了文件描述符相关的用户数据
+			// taggedPointer 包含指针和版本标记
+
+			// 获取 pollDesc 指针
+			// pollDesc 包含了文件描述符的完整轮询信息（如等待的goroutine、错误状态等）
 			pd := (*pollDesc)(tp.pointer())
+
+			// 获取文件描述符的版本标记
+			// 用于检测文件描述符是否已被重用
 			tag := tp.tag()
+
+			// 检查文件描述符的序列号是否匹配
+			// 防止文件描述符被关闭后重用导致的错误操作
 			if pd.fdseq.Load() == tag {
+				// 设置事件的错误状态
+				// ev.Events == syscall.EPOLLERR 表示发生了错误事件
 				pd.setEventErr(ev.Events == syscall.EPOLLERR, tag)
+
+				// 唤醒等待在这个文件描述符上的 goroutine
+				// toRun: 要恢复运行的 goroutine 列表
+				// pd: 轮询描述符
+				// mode: 就绪的 I/O 模式（读/写）
+				// delta: 累计等待者数量的变化
 				delta += netpollready(&toRun, pd, mode)
 			}
 		}
 	}
+
 	return toRun, delta
 }

@@ -155,11 +155,24 @@ func spuriousENOTAVAIL(err error) bool {
 
 func (ln *TCPListener) ok() bool { return ln != nil && ln.fd != nil }
 
+// accept 接受一个新的 TCP 连接
+//
+// 该方法是 TCPListener.Accept 的内部实现，它：
+// 1. 接受新的连接并获取对应的文件描述符
+// 2. 使用该文件描述符创建新的 TCP 连接对象
 func (ln *TCPListener) accept() (*TCPConn, error) {
+	// 调用底层文件描述符的 accept 方法接受新连接
+	// 返回新连接的文件描述符
 	fd, err := ln.fd.accept()
 	if err != nil {
 		return nil, err
 	}
+
+	// 创建并返回新的 TCP 连接对象，设置：
+	// - fd: 新连接的文件描述符
+	// - KeepAlive: TCP keepalive 设置
+	// - KeepAliveConfig: keepalive 的详细配置
+	// - testPreHookSetKeepAlive, testHookSetKeepAlive: 用于测试的钩子函数
 	return newTCPConn(fd, ln.lc.KeepAlive, ln.lc.KeepAliveConfig, testPreHookSetKeepAlive, testHookSetKeepAlive), nil
 }
 

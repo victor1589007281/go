@@ -179,25 +179,44 @@ func (fd *netFD) connect(ctx context.Context, la, ra syscall.Sockaddr) (rsa sysc
 	}
 }
 
+// accept 接受一个新的连接并返回对应的网络文件描述符
+//
+// 该方法完成从底层接受连接到创建新的网络文件描述符的完整过程
 func (fd *netFD) accept() (netfd *netFD, err error) {
+	// 调用底层的 Accept 方法接受新连接
+	// - d: 新连接的文件描述符
+	// - rsa: 远程地址
+	// - errcall: 如果出错，指示是哪个系统调用失败
+	// 接收一个连接，如果连接没有到达则堵塞当前协程
 	d, rsa, errcall, err := fd.pfd.Accept()
 	if err != nil {
 		if errcall != "" {
+			// 如果有系统调用名，包装成系统调用错误
 			err = wrapSyscallError(errcall, err)
 		}
 		return nil, err
 	}
 
+	// 使用新的文件描述符创建 netFD 对象
+	// 继承原监听器的地址族、套接字类型和网络类型
+	// 把新到的连接也添加到epoll中进行管理
 	if netfd, err = newFD(d, fd.family, fd.sotype, fd.net); err != nil {
+		// 如果创建失败，关闭文件描述符
 		poll.CloseFunc(d)
 		return nil, err
 	}
+
+	// 初始化新的文件描述符（设置非阻塞模式等）
 	if err = netfd.init(); err != nil {
+		// 如果初始化失败，关闭整个网络文件描述符
 		netfd.Close()
 		return nil, err
 	}
+
+	// 获取本地地址并设置连接的本地和远程地址
 	lsa, _ := syscall.Getsockname(netfd.pfd.Sysfd)
 	netfd.setAddr(netfd.addrFunc()(lsa), netfd.addrFunc()(rsa))
+
 	return netfd, nil
 }
 

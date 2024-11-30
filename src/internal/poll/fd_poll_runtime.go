@@ -77,14 +77,44 @@ func (pd *pollDesc) prepareWrite(isFile bool) error {
 	return pd.prepare('w', isFile)
 }
 
+// wait 等待文件描述符就绪
+//
+// 参数：
+//   - mode: 等待模式
+//     'r' (读取)
+//     'w' (写入)
+//   - isFile: 是否为普通文件
+//
+// 该方法是网络轮询器的核心等待函数
 func (pd *pollDesc) wait(mode int, isFile bool) error {
+	// 检查轮询上下文是否已初始化
+	// runtimeCtx 是在 pd.init() 中通过 runtime_pollOpen 设置的
 	if pd.runtimeCtx == 0 {
 		return errors.New("waiting for unsupported file type")
 	}
+
+	// 调用运行时的等待函数
+	// - pd.runtimeCtx: 轮询上下文，包含了文件描述符的信息
+	// - mode: 等待模式（读/写）
 	res := runtime_pollWait(pd.runtimeCtx, mode)
+
+	// 转换错误码为合适的错误类型
+	// 根据是否是文件可能有不同的错误处理策略
 	return convertErr(res, isFile)
 }
 
+// waitRead 等待文件描述符变为可读状态
+//
+// 参数：
+// - isFile: 是否是普通文件（而不是网络连接）
+//
+// 返回值：
+// - error: 等待过程中的错误，nil 表示成功
+//
+// 该方法通过调用 wait('r', isFile) 来等待读事件：
+// - 'r' 表示等待读事件（相对于 'w' 写事件）
+// - 如果是网络连接，会使用网络轮询器（如 epoll）
+// - 如果是普通文件，可能会使用不同的等待策略
 func (pd *pollDesc) waitRead(isFile bool) error {
 	return pd.wait('r', isFile)
 }

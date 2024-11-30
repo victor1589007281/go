@@ -369,17 +369,32 @@ func poll_runtime_pollReset(pd *pollDesc, mode int) int {
 // according to mode, which is 'r' or 'w'.
 // This returns an error code; the codes are defined above.
 //
+// poll_runtime_pollWait 等待文件描述符准备好进行读取或写入
+// 参数：
+// - pd: 轮询描述符
+// - mode: 模式，'r'表示读，'w'表示写
+// 返回值：错误码，定义见上方
+//
 //go:linkname poll_runtime_pollWait internal/poll.runtime_pollWait
 func poll_runtime_pollWait(pd *pollDesc, mode int) int {
+	// 首先检查是否有错误发生
+	// 例如：文件描述符已关闭、超时等
 	errcode := netpollcheckerr(pd, int32(mode))
 	if errcode != pollNoError {
 		return errcode
 	}
-	// As for now only Solaris, illumos, AIX and wasip1 use level-triggered IO.
+
+	// 某些操作系统使用水平触发的 I/O
+	// 需要重新注册（arm）事件
 	if GOOS == "solaris" || GOOS == "illumos" || GOOS == "aix" || GOOS == "wasip1" {
 		netpollarm(pd, mode)
 	}
+
+	// 循环尝试阻塞等待
+	// netpollblock 返回 true 表示事件已就绪
+	// 返回 false 表示需要重试（可能是虚假唤醒）
 	for !netpollblock(pd, int32(mode), false) {
+		// 每次重试前都要检查错误
 		errcode = netpollcheckerr(pd, int32(mode))
 		if errcode != pollNoError {
 			return errcode
@@ -387,7 +402,13 @@ func poll_runtime_pollWait(pd *pollDesc, mode int) int {
 		// Can happen if timeout has fired and unblocked us,
 		// but before we had a chance to run, timeout has been reset.
 		// Pretend it has not happened and retry.
+		//
+		// 可能发生的情况：
+		// 1. 超时触发并唤醒了我们
+		// 2. 但在我们运行之前，超时被重置了
+		// 这种情况下我们假装什么都没发生，继续重试
 	}
+
 	return pollNoError
 }
 

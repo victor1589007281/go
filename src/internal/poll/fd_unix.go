@@ -598,35 +598,61 @@ func (fd *FD) WriteMsgInet6(p []byte, oob []byte, sa *syscall.SockaddrInet6) (in
 }
 
 // Accept wraps the accept network call.
+//
+// Accept 封装了网络 accept 系统调用，实现了非阻塞的连接接受
 func (fd *FD) Accept() (int, syscall.Sockaddr, string, error) {
+	// 获取读锁，防止并发读取
+	// 在非阻塞模式下，这个锁保护了 accept 和 read 操作
 	if err := fd.readLock(); err != nil {
 		return -1, nil, "", err
 	}
+	// 确保在函数返回时释放锁
 	defer fd.readUnlock()
 
+	// 准备读取操作
+	// 设置必要的状态，确保文件描述符已准备好接受连接
 	if err := fd.pd.prepareRead(fd.isFile); err != nil {
 		return -1, nil, "", err
 	}
+
+	// 循环尝试接受连接
 	for {
+		// 尝试接受新连接
+		// - s: 新连接的文件描述符
+		// - rsa: 远程地址信息
+		// - errcall: 错误发生时的系统调用名称
 		s, rsa, errcall, err := accept(fd.Sysfd)
 		if err == nil {
 			return s, rsa, "", err
 		}
+
+		// 处理特定的错误情况
 		switch err {
 		case syscall.EINTR:
+			// 系统调用被信号中断，这是正常的，重试即可
 			continue
+
 		case syscall.EAGAIN:
+			// 当前没有连接可接受
 			if fd.pd.pollable() {
+				// 如果支持轮询，等待可读事件
+				// waitRead 会通过 epoll/kqueue 等机制等待连接到达
 				if err = fd.pd.waitRead(fd.isFile); err == nil {
-					continue
+					continue // 有新连接到达，重试 accept
 				}
 			}
+
 		case syscall.ECONNABORTED:
 			// This means that a socket on the listen
 			// queue was closed before we Accept()ed it;
 			// it's a silly error, so try again.
+			//
+			// 连接在我们接受之前就被对端关闭了
+			// 这是常见的情况，直接重试即可
 			continue
 		}
+
+		// 其他错误情况，返回错误
 		return -1, nil, errcall, err
 	}
 }

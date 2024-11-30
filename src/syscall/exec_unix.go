@@ -102,19 +102,39 @@ func SlicePtrFromStrings(ss []string) ([]*byte, error) {
 
 func CloseOnExec(fd int) { fcntl(fd, F_SETFD, FD_CLOEXEC) }
 
+// SetNonblock 设置文件描述符的非阻塞标志
+//
+// 参数：
+// - fd: 要设置的文件描述符
+// - nonblocking: true 表示设置为非阻塞模式，false 表示设置为阻塞模式
 func SetNonblock(fd int, nonblocking bool) (err error) {
+	// 获取文件描述符当前的标志
+	// F_GETFL: 获取文件状态标志
+	// 0: 额外参数（对 F_GETFL 操作无用）
 	flag, err := fcntl(fd, F_GETFL, 0)
 	if err != nil {
 		return err
 	}
+
+	// 检查当前的阻塞状态是否已经符合要求
+	// flag&O_NONBLOCK 获取非阻塞位
+	// 如果当前状态已经是目标状态，直接返回
 	if (flag&O_NONBLOCK != 0) == nonblocking {
 		return nil
 	}
+
+	// 根据 nonblocking 参数修改标志
 	if nonblocking {
+		// 设置非阻塞标志
 		flag |= O_NONBLOCK
 	} else {
+		// 清除非阻塞标志
+		// &^= 是按位清除操作符
 		flag &^= O_NONBLOCK
 	}
+
+	// 设置新的文件状态标志
+	// F_SETFL: 设置文件状态标志
 	_, err = fcntl(fd, F_SETFL, flag)
 	return err
 }

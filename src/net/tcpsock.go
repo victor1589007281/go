@@ -365,14 +365,29 @@ func (l *TCPListener) AcceptTCP() (*TCPConn, error) {
 
 // Accept implements the Accept method in the [Listener] interface; it
 // waits for the next call and returns a generic [Conn].
+//
+// Accept 实现了 Listener 接口中的 Accept 方法
+// 它会等待并接受下一个连接，返回一个通用的 Conn 接口
 func (l *TCPListener) Accept() (Conn, error) {
+	// 检查监听器是否有效
+	// ok() 方法会检查文件描述符是否已初始化且未关闭
 	if !l.ok() {
 		return nil, syscall.EINVAL
 	}
+
+	// 调用内部的 accept 方法接受新连接
 	c, err := l.accept()
 	if err != nil {
+		// 如果接受连接失败，包装错误信息
+		// - Op: 操作名称 "accept"
+		// - Net: 网络类型（如 "tcp"）
+		// - Source: 源地址（为空）
+		// - Addr: 本地监听地址
+		// - Err: 原始错误
 		return nil, &OpError{Op: "accept", Net: l.fd.net, Source: nil, Addr: l.fd.laddr, Err: err}
 	}
+
+	// 成功则返回新的连接
 	return c, nil
 }
 

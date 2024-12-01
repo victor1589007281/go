@@ -468,21 +468,28 @@ func (d *Dialer) Dial(network, address string) (Conn, error) {
 // See func [Dial] for a description of the network and address
 // parameters.
 func (d *Dialer) DialContext(ctx context.Context, network, address string) (Conn, error) {
+	// DialContext 使用提供的上下文连接到指定网络地址
 	if ctx == nil {
 		panic("nil context")
 	}
+
+	// 获取连接截止时间
 	deadline := d.deadline(ctx, time.Now())
 	if !deadline.IsZero() {
 		testHookStepTime()
+		// 如���号器的截止间早于上下文的截止时间，创建新的子上下文
 		if d, ok := ctx.Deadline(); !ok || deadline.Before(d) {
 			subCtx, cancel := context.WithDeadline(ctx, deadline)
 			defer cancel()
 			ctx = subCtx
 		}
 	}
+
+	// 处理已弃用的 Cancel 字段
 	if oldCancel := d.Cancel; oldCancel != nil {
 		subCtx, cancel := context.WithCancel(ctx)
 		defer cancel()
+		// 启动 goroutine 监听取消信号
 		go func() {
 			select {
 			case <-oldCancel:
@@ -494,6 +501,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, address string) (Conn
 	}
 
 	// Shadow the nettrace (if any) during resolve so Connect events don't fire for DNS lookups.
+	// 在解析过程中屏蔽网络追踪，避免 DNS 查询触发连接事件
 	resolveCtx := ctx
 	if trace, _ := ctx.Value(nettrace.TraceKey{}).(*nettrace.Trace); trace != nil {
 		shadow := *trace
@@ -502,24 +510,30 @@ func (d *Dialer) DialContext(ctx context.Context, network, address string) (Conn
 		resolveCtx = context.WithValue(resolveCtx, nettrace.TraceKey{}, &shadow)
 	}
 
+	// 解析地址列表
 	addrs, err := d.resolver().resolveAddrList(resolveCtx, "dial", network, address, d.LocalAddr)
 	if err != nil {
 		return nil, &OpError{Op: "dial", Net: network, Source: nil, Addr: nil, Err: err}
 	}
 
+	// 创建系统拨号器
 	sd := &sysDialer{
 		Dialer:  *d,
 		network: network,
 		address: address,
 	}
 
+	// 对于 TCP 连接，将地址分为主要地址和后备地址
 	var primaries, fallbacks addrList
 	if d.dualStack() && network == "tcp" {
+		// 如果启用了双栈模式，将地址按 IPv4 和 IPv6 分类
 		primaries, fallbacks = addrs.partition(isIPv4)
 	} else {
+		// 否则所有地址都作为主要地址
 		primaries = addrs
 	}
 
+	// 并行尝试连接主要地址和后备地址
 	return sd.dialParallel(ctx, primaries, fallbacks)
 }
 
@@ -527,67 +541,84 @@ func (d *Dialer) DialContext(ctx context.Context, network, address string) (Conn
 // head start. It returns the first established connection and
 // closes the others. Otherwise it returns an error from the first
 // primary address.
+// dialParallel 并行执行两个 dialSerial 副本，让第一个先启动。
+// 返回第一个建立的连接并关闭其他连接。如果都失败则返回第一个主要地址的错误。
 func (sd *sysDialer) dialParallel(ctx context.Context, primaries, fallbacks addrList) (Conn, error) {
+	// 如果没有后备地址，直接使用主要地址进行串行拨号
 	if len(fallbacks) == 0 {
 		return sd.dialSerial(ctx, primaries)
 	}
 
+	// 创建一个通道用于通知其他 goroutine 函数已返回
 	returned := make(chan struct{})
 	defer close(returned)
 
+	// 定义拨号结果的结构体
 	type dialResult struct {
-		Conn
-		error
-		primary bool
-		done    bool
+		Conn         // 连接
+		error        // 错误
+		primary bool // 是否为主要地址
+		done    bool // 是否完成
 	}
-	results := make(chan dialResult) // unbuffered
+	// 创建无缓冲通道用于接收拨号结果
+	results := make(chan dialResult)
 
+	// 定义启动拨号竞争者的函数
 	startRacer := func(ctx context.Context, primary bool) {
+		// 根据是否为主要地址选择地址列表
 		ras := primaries
 		if !primary {
 			ras = fallbacks
 		}
+		// 执行串行拨号
 		c, err := sd.dialSerial(ctx, ras)
 		select {
 		case results <- dialResult{Conn: c, error: err, primary: primary, done: true}:
 		case <-returned:
+			// 如果函数已返回，关闭建立的连接
 			if c != nil {
 				c.Close()
 			}
 		}
 	}
 
+	// 存储主要和后备拨号的结果
 	var primary, fallback dialResult
 
-	// Start the main racer.
+	// 启动主要地址的拨号
 	primaryCtx, primaryCancel := context.WithCancel(ctx)
 	defer primaryCancel()
 	go startRacer(primaryCtx, true)
 
-	// Start the timer for the fallback racer.
+	// 启动后备地址拨号的定时器
 	fallbackTimer := time.NewTimer(sd.fallbackDelay())
 	defer fallbackTimer.Stop()
 
+	// 等待拨号结果
 	for {
 		select {
 		case <-fallbackTimer.C:
+			// 定时器到期，启动后备地址的拨号
 			fallbackCtx, fallbackCancel := context.WithCancel(ctx)
 			defer fallbackCancel()
 			go startRacer(fallbackCtx, false)
 
 		case res := <-results:
+			// 如果拨号成功，直接返回连接
 			if res.error == nil {
 				return res.Conn, nil
 			}
+			// 存储拨号结果
 			if res.primary {
 				primary = res
 			} else {
 				fallback = res
 			}
+			// 如果主要和后备地址都已完成且都失败，返回主要地址的错误
 			if primary.done && fallback.done {
 				return nil, primary.error
 			}
+			// 如果主要地址拨号失败且定时器还未触发，立即启动后备地址拨号
 			if res.primary && fallbackTimer.Stop() {
 				// If we were able to stop the timer, that means it
 				// was running (hadn't yet started the fallback), but
@@ -601,26 +632,40 @@ func (sd *sysDialer) dialParallel(ctx context.Context, primaries, fallbacks addr
 
 // dialSerial connects to a list of addresses in sequence, returning
 // either the first successful connection, or the first error.
+// dialSerial 按顺序连接地址列表中的地址，返回第一个成功的连接或第一个错误
+// 参数:
+// - ctx: 上下文，用于控制连接超时和取消
+// - ras: 要尝试连接的地址列表
 func (sd *sysDialer) dialSerial(ctx context.Context, ras addrList) (Conn, error) {
-	var firstErr error // The error from the first address is most relevant.
+	// 保存第一个错误，因为第一个错误通常最具参考价值
+	var firstErr error
 
+	// 遍历所有地址尝试连接
 	for i, ra := range ras {
+		// 检查上下文是否已取消
 		select {
 		case <-ctx.Done():
 			return nil, &OpError{Op: "dial", Net: sd.network, Source: sd.LocalAddr, Addr: ra, Err: mapErr(ctx.Err())}
 		default:
 		}
 
+		// 使用原始上下文
 		dialCtx := ctx
+
+		// 如果上下文设置了截止时间
 		if deadline, hasDeadline := ctx.Deadline(); hasDeadline {
+			// 计算当前地址可用的部分截止时间
+			// 剩余时间会根据剩余待尝试的地址数量进行分配
 			partialDeadline, err := partialDeadline(time.Now(), deadline, len(ras)-i)
 			if err != nil {
-				// Ran out of time.
+				// 如果已超时，且这是第一个错误，则记录该错误
 				if firstErr == nil {
 					firstErr = &OpError{Op: "dial", Net: sd.network, Source: sd.LocalAddr, Addr: ra, Err: err}
 				}
 				break
 			}
+
+			// 如果部分截止时间早于总截止时间，创建新的上下文
 			if partialDeadline.Before(deadline) {
 				var cancel context.CancelFunc
 				dialCtx, cancel = context.WithDeadline(ctx, partialDeadline)
@@ -628,58 +673,86 @@ func (sd *sysDialer) dialSerial(ctx context.Context, ras addrList) (Conn, error)
 			}
 		}
 
+		// 尝试连接单个地址
 		c, err := sd.dialSingle(dialCtx, ra)
 		if err == nil {
+			// 连接成功，直接返回
 			return c, nil
 		}
+		// 如果这是第一个错误，记录下来
 		if firstErr == nil {
 			firstErr = err
 		}
 	}
 
+	// 如果没有任何错误记录（可能是地址列表为空），
+	// 返回缺少地址的错误
 	if firstErr == nil {
 		firstErr = &OpError{Op: "dial", Net: sd.network, Source: nil, Addr: nil, Err: errMissingAddress}
 	}
 	return nil, firstErr
 }
 
-// dialSingle attempts to establish and returns a single connection to
-// the destination address.
+// dialSingle 尝试建立并返回一个到目标地址的单个连接
+// 参数:
+// - ctx: 上下文，用于控制连接超时和取消
+// - ra: 目标远程地址
+// 返回:
+// - c: 建立的连接
+// - err: 错误信息
 func (sd *sysDialer) dialSingle(ctx context.Context, ra Addr) (c Conn, err error) {
+	// 从上下文中获取网络追踪对象
 	trace, _ := ctx.Value(nettrace.TraceKey{}).(*nettrace.Trace)
 	if trace != nil {
+		// 将远程地址转换为字符串
 		raStr := ra.String()
+		// 如果设置了连接开始回调，调用它
 		if trace.ConnectStart != nil {
 			trace.ConnectStart(sd.network, raStr)
 		}
+		// 如果设置了连接完成回调，在函数返回时调用它
 		if trace.ConnectDone != nil {
 			defer func() { trace.ConnectDone(sd.network, raStr, err) }()
 		}
 	}
+
+	// 获取本地地址
 	la := sd.LocalAddr
+
+	// 根据远程地址类型选择不同的拨号方法
 	switch ra := ra.(type) {
 	case *TCPAddr:
+		// TCP 地址
 		la, _ := la.(*TCPAddr)
 		if sd.MultipathTCP() {
+			// 如果启用了多路径 TCP，使用 MPTCP 拨号
 			c, err = sd.dialMPTCP(ctx, la, ra)
 		} else {
+			// 否则使用普通 TCP 拨号
 			c, err = sd.dialTCP(ctx, la, ra)
 		}
 	case *UDPAddr:
+		// UDP 地址
 		la, _ := la.(*UDPAddr)
 		c, err = sd.dialUDP(ctx, la, ra)
 	case *IPAddr:
+		// IP 地址
 		la, _ := la.(*IPAddr)
 		c, err = sd.dialIP(ctx, la, ra)
 	case *UnixAddr:
+		// Unix 域套接字地址
 		la, _ := la.(*UnixAddr)
 		c, err = sd.dialUnix(ctx, la, ra)
 	default:
 		return nil, &OpError{Op: "dial", Net: sd.network, Source: la, Addr: ra, Err: &AddrError{Err: "unexpected address type", Addr: sd.address}}
 	}
+
+	// 如果拨号过程中发生错误，返回带有详细错误信息的 OpError
 	if err != nil {
 		return nil, &OpError{Op: "dial", Net: sd.network, Source: la, Addr: ra, Err: err} // c is non-nil interface containing nil pointer
 	}
+
+	// 返回成功建立的连接
 	return c, nil
 }
 

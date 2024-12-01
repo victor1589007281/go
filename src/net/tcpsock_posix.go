@@ -34,9 +34,11 @@ func (a *TCPAddr) family() int {
 }
 
 func (a *TCPAddr) sockaddr(family int) (syscall.Sockaddr, error) {
+	// 如果 TCP 地址为空，直接返回 nil
 	if a == nil {
 		return nil, nil
 	}
+	// 将 IP 地址、端口和区域信息转换为系统层面的 sockaddr 结构
 	return ipToSockaddr(family, a.IP, a.Port, a.Zone)
 }
 
@@ -62,26 +64,41 @@ func (c *TCPConn) writeTo(w io.Writer) (int64, error) {
 }
 
 func (sd *sysDialer) dialTCP(ctx context.Context, laddr, raddr *TCPAddr) (*TCPConn, error) {
+	// 检查是否存在系统拨号器级别的测试钩子函数
 	if h := sd.testHookDialTCP; h != nil {
 		return h(ctx, sd.network, laddr, raddr)
 	}
+	// 检查是否存在全局级别的测试钩子函数
 	if h := testHookDialTCP; h != nil {
 		return h(ctx, sd.network, laddr, raddr)
 	}
+	// 如果没有测试钩子，则执行实际的 TCP 连接操作
 	return sd.doDialTCP(ctx, laddr, raddr)
 }
 
+// doDialTCP 是一个简单的包装函数，调用 doDialTCPProto 并使用默认协议号(0)
 func (sd *sysDialer) doDialTCP(ctx context.Context, laddr, raddr *TCPAddr) (*TCPConn, error) {
 	return sd.doDialTCPProto(ctx, laddr, raddr, 0)
 }
 
+// doDialTCPProto 执行实际的 TCP 连接操作
+//
+// 参数说明：
+// - ctx: 上下文，用于控制连接超时等
+// - laddr: 本地地址，可以为 nil
+// - raddr: 远程地址，建立连接的目标地址
+// - proto: 协议号，0 表示使用默认 TCP 协议
 func (sd *sysDialer) doDialTCPProto(ctx context.Context, laddr, raddr *TCPAddr, proto int) (*TCPConn, error) {
+	// 获取用户配置的连接控制函数
 	ctrlCtxFn := sd.Dialer.ControlContext
+	// 如果没有设置 ControlContext 但设置了 Control，则创建一个包装函数
 	if ctrlCtxFn == nil && sd.Dialer.Control != nil {
 		ctrlCtxFn = func(ctx context.Context, network, address string, c syscall.RawConn) error {
 			return sd.Dialer.Control(network, address, c)
 		}
 	}
+
+	// 创建 TCP socket 并进行连接
 	fd, err := internetSocket(ctx, sd.network, laddr, raddr, syscall.SOCK_STREAM, proto, "dial", ctrlCtxFn)
 
 	// TCP has a rarely used mechanism called a 'simultaneous connection' in
@@ -108,6 +125,13 @@ func (sd *sysDialer) doDialTCPProto(ctx context.Context, laddr, raddr *TCPAddr, 
 	// a different reason.
 	//
 	// The kernel socket code is no doubt enjoying watching us squirm.
+	// 处理特殊情况：自连接(self-connect)和地址不可用
+	// 当本地地址为空或端口为0时，内核会自动选择地址和端口
+	// 在某些 Linux 内核中可能会出现以下问题：
+	// 1. 自连接：内核选择的源端口恰好是目标端口，导致连接到自己
+	// 2. 地址不可用：内核选择的地址已被占用
+	//
+	// 如果发生这些情况，最多重试两次
 	for i := 0; i < 2 && (laddr == nil || laddr.Port == 0) && (selfConnect(fd, err) || spuriousENOTAVAIL(err)); i++ {
 		if err == nil {
 			fd.Close()
@@ -115,9 +139,13 @@ func (sd *sysDialer) doDialTCPProto(ctx context.Context, laddr, raddr *TCPAddr, 
 		fd, err = internetSocket(ctx, sd.network, laddr, raddr, syscall.SOCK_STREAM, proto, "dial", ctrlCtxFn)
 	}
 
+	// 如果连接出错，返回错误
 	if err != nil {
 		return nil, err
 	}
+
+	// 创建并返回新的 TCP 连接对象
+	// 设置 keepalive 相关配置和测试钩子
 	return newTCPConn(fd, sd.Dialer.KeepAlive, sd.Dialer.KeepAliveConfig, testPreHookSetKeepAlive, testHookSetKeepAlive), nil
 }
 
@@ -159,7 +187,7 @@ func (ln *TCPListener) ok() bool { return ln != nil && ln.fd != nil }
 //
 // 该方法是 TCPListener.Accept 的内部实现，它：
 // 1. 接受新的连接并获取对应的文件描述符
-// 2. 使用该文件描述符创建新的 TCP 连接对象
+// 2. 使用该文件描述符创建的 TCP 连接对象
 func (ln *TCPListener) accept() (*TCPConn, error) {
 	// 调用底层文件描述符的 accept 方法接受新连接
 	// 返回新连接的文件描述符

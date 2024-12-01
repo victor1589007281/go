@@ -63,18 +63,33 @@ func (fd *netFD) name() string {
 	return fd.net + ":" + ls + "->" + rs
 }
 
+// connect 建立网络连接
+//
+// 参数:
+// - ctx: 上下文，用于控制连接超时和取消
+// - la: 本地地址 (Local Address)
+// - ra: 远程地址 (Remote Address)
+//
+// 返回:
+// - rsa: 远程套接字地址
+// - ret: 错误信息
 func (fd *netFD) connect(ctx context.Context, la, ra syscall.Sockaddr) (rsa syscall.Sockaddr, ret error) {
 	// Do not need to call fd.writeLock here,
 	// because fd is not yet accessible to user,
 	// so no concurrent operations are possible.
+	// 不需要获取写锁，因为此时文件描述符还未暴露给用户，不存在并发操作
+	//调用系统调用connect
 	switch err := connectFunc(fd.pfd.Sysfd, ra); err {
 	case syscall.EINPROGRESS, syscall.EALREADY, syscall.EINTR:
+		// 连接正在进行中，继续后续处理
 	case nil, syscall.EISCONN:
+		// 连接成功或已经连接
 		select {
 		case <-ctx.Done():
 			return nil, mapErr(ctx.Err())
 		default:
 		}
+		//把文件描述符设置为非阻塞模式，同时加入到epoll实例中
 		if err := fd.pfd.Init(fd.net, true); err != nil {
 			return nil, err
 		}
@@ -86,6 +101,9 @@ func (fd *netFD) connect(ctx context.Context, la, ra syscall.Sockaddr) (rsa sysc
 		// as a successful connection--writes to the socket will see
 		// EOF.  For details and a test case in C see
 		// https://golang.org/issue/6828.
+		// Solaris 和 illumos 系统特殊处理：
+		// 如果服务器已经接受并关闭了socket，会返回EINVAL
+		// 这种情况下将其视为连接成功，后续写入会收到EOF
 		if runtime.GOOS == "solaris" || runtime.GOOS == "illumos" {
 			return nil, nil
 		}
@@ -93,6 +111,7 @@ func (fd *netFD) connect(ctx context.Context, la, ra syscall.Sockaddr) (rsa sysc
 	default:
 		return nil, os.NewSyscallError("connect", err)
 	}
+	//把文件描述符设置为非阻塞模式，同时加入到epoll实例中
 	if err := fd.pfd.Init(fd.net, true); err != nil {
 		return nil, err
 	}
@@ -106,10 +125,12 @@ func (fd *netFD) connect(ctx context.Context, la, ra syscall.Sockaddr) (rsa sysc
 	// The interrupter goroutine waits for the context to be done and
 	// interrupts the dial (by altering the fd's write deadline, which
 	// wakes up waitWrite).
+	// 如果上下文可能被取消，启动中断器goroutine
 	ctxDone := ctx.Done()
 	if ctxDone != nil {
 		// Wait for the interrupter goroutine to exit before returning
 		// from connect.
+		// 创建通道用于等待中断器goroutine退出
 		done := make(chan struct{})
 		interruptRes := make(chan error)
 		defer func() {
@@ -121,16 +142,22 @@ func (fd *netFD) connect(ctx context.Context, la, ra syscall.Sockaddr) (rsa sysc
 				// == nil). Because we've now poisoned the connection
 				// by making it unwritable, don't return a successful
 				// dial. This was issue 16523.
+				// 如果中断器调用了SetWriteDeadline，但连接已成功建立
+				// 由于连接已被设置为不可写，不应返回成功
+				// 这是为了修复issue 16523
 				ret = mapErr(ctxErr)
-				fd.Close() // prevent a leak
+				fd.Close() // 防止泄漏
 			}
 		}()
+
+		// 启动中断器goroutine
 		go func() {
 			select {
 			case <-ctxDone:
 				// Force the runtime's poller to immediately give up
 				// waiting for writability, unblocking waitWrite
 				// below.
+				// 强制运行时轮询器立即放弃等待可写性
 				fd.pfd.SetWriteDeadline(aLongTimeAgo)
 				testHookCanceledDial()
 				interruptRes <- ctx.Err()
@@ -140,6 +167,7 @@ func (fd *netFD) connect(ctx context.Context, la, ra syscall.Sockaddr) (rsa sysc
 		}()
 	}
 
+	// 循环尝试建立连接
 	for {
 		// Performing multiple connect system calls on a
 		// non-blocking socket under Unix variants does not
@@ -149,6 +177,11 @@ func (fd *netFD) connect(ctx context.Context, la, ra syscall.Sockaddr) (rsa sysc
 		// SO_ERROR socket option to see if the connection
 		// succeeded or failed. See issue 7474 for further
 		// details.
+		// Unix系统下对非阻塞socket多次调用connect
+		// 不一定能立即返回早期的错误
+		// 因此，等待运行时网络轮询器通知socket就绪后
+		// 通过SO_ERROR选项检查连接是否成功
+		// 详见issue 7474
 		if err := fd.pfd.WaitWrite(); err != nil {
 			select {
 			case <-ctxDone:
@@ -157,25 +190,32 @@ func (fd *netFD) connect(ctx context.Context, la, ra syscall.Sockaddr) (rsa sysc
 			}
 			return nil, err
 		}
+
+		// 获取socket错误状态
 		nerr, err := getsockoptIntFunc(fd.pfd.Sysfd, syscall.SOL_SOCKET, syscall.SO_ERROR)
 		if err != nil {
 			return nil, os.NewSyscallError("getsockopt", err)
 		}
+
 		switch err := syscall.Errno(nerr); err {
 		case syscall.EINPROGRESS, syscall.EALREADY, syscall.EINTR:
+			// 连接仍在进行中，继续等待
 		case syscall.EISCONN:
+			// 已连接成功
 			return nil, nil
 		case syscall.Errno(0):
 			// The runtime poller can wake us up spuriously;
 			// see issues 14548 and 19289. Check that we are
 			// really connected; if not, wait again.
+			// 运行时轮询器可能会虚假唤醒（见issues 14548和19289）
+			// 通过Getpeername确认是否真正连接；若未连接，继续等待
 			if rsa, err := syscall.Getpeername(fd.pfd.Sysfd); err == nil {
 				return rsa, nil
 			}
 		default:
 			return nil, os.NewSyscallError("connect", err)
 		}
-		runtime.KeepAlive(fd)
+		runtime.KeepAlive(fd) // 防止fd被过早回收
 	}
 }
 

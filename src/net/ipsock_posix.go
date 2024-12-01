@@ -186,15 +186,29 @@ func internetSocket(ctx context.Context, net string, laddr, raddr sockaddr, soty
 	return socket(ctx, net, family, sotype, proto, ipv6only, laddr, raddr, ctrlCtxFn)
 }
 
+// ipToSockaddrInet4 将 IP 地址和端口号转换为 IPv4 的系统套接字地址结构
+//
+// 参数说明：
+// - ip: IP 地址，可以是 nil 或空，此时会使用 IPv4zero（0.0.0.0）
+// - port: 端口号
+//
+// 返回值：
+// - syscall.SockaddrInet4: IPv4 套接字地址结构
+// - error: 如果输入的 IP 地址不是合法的 IPv4 地址，则返回错误
 func ipToSockaddrInet4(ip IP, port int) (syscall.SockaddrInet4, error) {
+	// 如果 IP 地址为空，使用 IPv4 零地址（0.0.0.0）
 	if len(ip) == 0 {
 		ip = IPv4zero
 	}
+	// 将 IP 转换为 4 字节的 IPv4 地址
+	// 如果输入的不是 IPv4 地址，To4() 将返回 nil
 	ip4 := ip.To4()
 	if ip4 == nil {
 		return syscall.SockaddrInet4{}, &AddrError{Err: "non-IPv4 address", Addr: ip.String()}
 	}
+	// 创建套接字地址结构并设置端口号
 	sa := syscall.SockaddrInet4{Port: port}
+	// 将 4 字节的 IPv4 地址复制到套接字地址结构中
 	copy(sa.Addr[:], ip4)
 	return sa, nil
 }
@@ -231,25 +245,45 @@ func ipToSockaddrInet6(ip IP, port int, zone string) (syscall.SockaddrInet6, err
 //   - github.com/metacubex/tfo-go
 //   - github.com/sagernet/tfo-go
 //
+// ipToSockaddr 将 IP 地址转换为系统底层的 socket 地址结构
+//
 // Do not remove or change the type signature.
 // See go.dev/issue/67401.
+// 参数说明：
+// - family: 地址族（syscall.AF_INET 用于 IPv4，syscall.AF_INET6 用于 IPv6）
+// - ip: 要转换的 IP 地址
+// - port: 端口号
+// - zone: IPv6 的区域标识符（对于 IPv4 地址，此参数会被忽略）
+//
+// 返回值：
+// - syscall.Sockaddr: 转换后的系统 socket 地址结构
+// - error: 转换过程中可能发生的错误
+//
+// 注意：此函数虽为内部实现细节，但因历史原因被多个外部包通过 linkname 直接使用，
+// 因此函数签名不能改变。参考 go.dev/issue/67401
 //
 //go:linkname ipToSockaddr
 func ipToSockaddr(family int, ip IP, port int, zone string) (syscall.Sockaddr, error) {
+	// 根据地址族类型选择不同的处理方式
 	switch family {
 	case syscall.AF_INET:
+		// 处理 IPv4 地址
 		sa, err := ipToSockaddrInet4(ip, port)
 		if err != nil {
 			return nil, err
 		}
+		// 返回 IPv4 socket 地址结构的指针
 		return &sa, nil
 	case syscall.AF_INET6:
+		// 处理 IPv6 地址，zone 参数用于指定 IPv6 作用域
 		sa, err := ipToSockaddrInet6(ip, port, zone)
 		if err != nil {
 			return nil, err
 		}
+		// 返回 IPv6 socket 地址结构的指针
 		return &sa, nil
 	}
+	// 如果地址族既不是 IPv4 也不是 IPv6，返回错误
 	return nil, &AddrError{Err: "invalid address family", Addr: ip.String()}
 }
 

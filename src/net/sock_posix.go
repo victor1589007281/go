@@ -101,34 +101,43 @@ func (fd *netFD) ctrlNetwork() string {
 }
 
 func (fd *netFD) dial(ctx context.Context, laddr, raddr sockaddr, ctrlCtxFn func(context.Context, string, string, syscall.RawConn) error) error {
+	// 处理自定义控制函数
 	var c *rawConn
 	if ctrlCtxFn != nil {
 		c = newRawConn(fd)
 		var ctrlAddr string
+		// 优先使用远程地址作为控制地址，如果没有则使用本地地址
 		if raddr != nil {
 			ctrlAddr = raddr.String()
 		} else if laddr != nil {
 			ctrlAddr = laddr.String()
 		}
+		// 执行自定义控制函数
 		if err := ctrlCtxFn(ctx, fd.ctrlNetwork(), ctrlAddr, c); err != nil {
 			return err
 		}
 	}
 
+	// 处理本地地址绑定
 	var lsa syscall.Sockaddr
 	var err error
 	if laddr != nil {
+		// 将高层地址转换为系统套接字地址
 		if lsa, err = laddr.sockaddr(fd.family); err != nil {
 			return err
 		} else if lsa != nil {
+			// 绑定本地地址
 			if err = syscall.Bind(fd.pfd.Sysfd, lsa); err != nil {
 				return os.NewSyscallError("bind", err)
 			}
 		}
 	}
-	var rsa syscall.Sockaddr  // remote address from the user
-	var crsa syscall.Sockaddr // remote address we actually connected to
+
+	// 处理远程连接
+	var rsa syscall.Sockaddr  // 用户提供的远程地址
+	var crsa syscall.Sockaddr // 实际连接的远程地址
 	if raddr != nil {
+		// 建立连接
 		if rsa, err = raddr.sockaddr(fd.family); err != nil {
 			return err
 		}
@@ -137,6 +146,7 @@ func (fd *netFD) dial(ctx context.Context, laddr, raddr sockaddr, ctrlCtxFn func
 		}
 		fd.isConnected = true
 	} else {
+		// 如果没有远程地址，仅初始化文件描述符
 		if err := fd.init(); err != nil {
 			return err
 		}
@@ -147,7 +157,13 @@ func (fd *netFD) dial(ctx context.Context, laddr, raddr sockaddr, ctrlCtxFn func
 	// 1) the one returned by the connect method, if any; or
 	// 2) the one from Getpeername, if it succeeds; or
 	// 3) the one passed to us as the raddr parameter.
+
+	// 获取并记录实际的本地和远程地址
 	lsa, _ = syscall.Getsockname(fd.pfd.Sysfd)
+	// 按优先级设置远程地址：
+	// 1. 实际连接的地址
+	// 2. 通过 Getpeername 获取的地址
+	// 3. 用户提供的原始地址
 	if crsa != nil {
 		fd.setAddr(fd.addrFunc()(lsa), fd.addrFunc()(crsa))
 	} else if rsa, _ = syscall.Getpeername(fd.pfd.Sysfd); rsa != nil {

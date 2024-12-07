@@ -16,7 +16,7 @@ import (
 // socket returns a network file descriptor that is ready for
 // asynchronous I/O using the network poller.
 //
-// socket 返回一个网络文件描述符，该描述符已准备好使用网络轮询器进行异步 I/O
+// socket 返回一个网络文件描述符*netFD，该描述符已准备好使用网络轮询器进行异步 I/O
 func socket(ctx context.Context, net string, family, sotype, proto int, ipv6only bool, laddr, raddr sockaddr, ctrlCtxFn func(context.Context, string, string, syscall.RawConn) error) (fd *netFD, err error) {
 	// 创建系统套接字
 	s, err := sysSocket(family, sotype, proto)
@@ -62,13 +62,15 @@ func socket(ctx context.Context, net string, family, sotype, proto int, ipv6only
 		switch sotype {
 		case syscall.SOCK_STREAM, syscall.SOCK_SEQPACKET:
 			// 对于流式套接字，设置为流监听模式
+			// - 流监听器：用于打开被动流连接的端点持有者(先拨号建立起连接，字节传输，可靠传输)
 			if err := fd.listenStream(ctx, laddr, listenerBacklog(), ctrlCtxFn); err != nil {
 				fd.Close()
 				return nil, err
 			}
 			return fd, nil
 		case syscall.SOCK_DGRAM:
-			// 对于数据报套接字，设置为数据报监听模式
+			// 对于数据报套接字，设置为数据报监听模式(不需要提前建立连接，数据包传输，不可靠)
+			// - 数据报监听器：用于打开未指定目标的数据报连接的端点持有者
 			if err := fd.listenDatagram(ctx, laddr, ctrlCtxFn); err != nil {
 				fd.Close()
 				return nil, err
@@ -78,6 +80,7 @@ func socket(ctx context.Context, net string, family, sotype, proto int, ipv6only
 	}
 
 	// 如果不是监听模式，则进行连接操作
+	// - 拨号器：用于打开主动流连接或指定目标的数据报连接的端点持有者
 	if err := fd.dial(ctx, laddr, raddr, ctrlCtxFn); err != nil {
 		fd.Close()
 		return nil, err
@@ -100,7 +103,10 @@ func (fd *netFD) ctrlNetwork() string {
 	return fd.net + "6"
 }
 
-func (fd *netFD) dial(ctx context.Context, laddr, raddr sockaddr, ctrlCtxFn func(context.Context, string, string, syscall.RawConn) error) error {
+//
+//connect建立连接
+func (fd *netFD) dial(ctx context.Context, laddr, raddr sockaddr, 
+	ctrlCtxFn func(context.Context, string, string, syscall.RawConn) error) error {
 	// 处理自定义控制函数
 	var c *rawConn
 	if ctrlCtxFn != nil {
@@ -181,7 +187,8 @@ func (fd *netFD) dial(ctx context.Context, laddr, raddr sockaddr, ctrlCtxFn func
 // - laddr: 要监听的本地地址
 // - backlog: 监听队列的最大长度
 // - ctrlCtxFn: 用于自定义控制套接字的回调函数
-func (fd *netFD) listenStream(ctx context.Context, laddr sockaddr, backlog int, ctrlCtxFn func(context.Context, string, string, syscall.RawConn) error) error {
+func (fd *netFD) listenStream(ctx context.Context, laddr sockaddr, backlog int,
+	 ctrlCtxFn func(context.Context, string, string, syscall.RawConn) error) error {
 	var err error
 	// 设置监听套接字的默认选项（如地址重用等）
 	if err = setDefaultListenerSockopts(fd.pfd.Sysfd); err != nil {
@@ -224,7 +231,9 @@ func (fd *netFD) listenStream(ctx context.Context, laddr sockaddr, backlog int, 
 	return nil
 }
 
-func (fd *netFD) listenDatagram(ctx context.Context, laddr sockaddr, ctrlCtxFn func(context.Context, string, string, syscall.RawConn) error) error {
+//设置数据包套接字的监听(UDP)
+func (fd *netFD) listenDatagram(ctx context.Context, laddr sockaddr,
+	 ctrlCtxFn func(context.Context, string, string, syscall.RawConn) error) error {
 	switch addr := laddr.(type) {
 	case *UDPAddr:
 		// We provide a socket that listens to a wildcard

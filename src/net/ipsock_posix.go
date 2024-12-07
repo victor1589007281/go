@@ -129,6 +129,7 @@ func (p *ipStackCapabilities) probe() {
 //
 // Do not remove or change the type signature.
 // See go.dev/issue/67401.
+// 获取网络地址族
 //
 //go:linkname favoriteAddrFamily
 func favoriteAddrFamily(network string, laddr, raddr sockaddr, mode string) (family int, ipv6only bool) {

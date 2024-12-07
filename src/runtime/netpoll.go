@@ -73,7 +73,8 @@ const pollBlockSize = 4 * 1024
 //
 // No heap pointers.
 type pollDesc struct {
-	_     sys.NotInHeap
+	_ sys.NotInHeap
+	//指向下一个pollDesc对象，通过这个方式形成一个链表
 	link  *pollDesc      // in pollcache, protected by pollcache.lock
 	fd    uintptr        // constant for pollDesc usage lifetime
 	fdseq atomic.Uintptr // protects against stale pollDesc
@@ -97,6 +98,9 @@ type pollDesc struct {
 
 	// rg, wg are accessed atomically and hold g pointers.
 	// (Using atomic.Uintptr here is similar to using guintptr elsewhere.)
+	// 读等待组和写等待组，分别用于等待读和写事件
+	// rg, wg 是以原子方式访问的，持有 g 指针。
+	// （在此使用 atomic.Uintptr 类似于在其他地方使用 guintptr。）
 	rg atomic.Uintptr // pdReady, pdWait, G waiting for read or pdNil
 	wg atomic.Uintptr // pdReady, pdWait, G waiting for write or pdNil
 
@@ -785,29 +789,28 @@ func netpollAdjustWaiters(delta int32) {
 }
 
 func (c *pollCache) alloc() *pollDesc {
-	lock(&c.lock)
-	if c.first == nil {
-		const pdSize = unsafe.Sizeof(pollDesc{})
-		n := pollBlockSize / pdSize
+	lock(&c.lock)       // 加锁以保护对 pollCache 的访问
+	if c.first == nil { // 如果没有可用的 pollDesc
+		const pdSize = unsafe.Sizeof(pollDesc{}) // 获取 pollDesc 的大小
+		n := pollBlockSize / pdSize              // 计算可以分配的 pollDesc 数量
 		if n == 0 {
-			n = 1
+			n = 1 // 确保至少分配一个
 		}
-		// Must be in non-GC memory because can be referenced
-		// only from epoll/kqueue internals.
+		// 在非 GC 内存中分配，因为只能从 epoll/kqueue 内部引用
 		mem := persistentalloc(n*pdSize, 0, &memstats.other_sys)
 		for i := uintptr(0); i < n; i++ {
-			pd := (*pollDesc)(add(mem, i*pdSize))
-			lockInit(&pd.lock, lockRankPollDesc)
-			pd.rt.init(nil, nil)
-			pd.wt.init(nil, nil)
-			pd.link = c.first
-			c.first = pd
+			pd := (*pollDesc)(add(mem, i*pdSize)) // 计算每个 pollDesc 的地址
+			lockInit(&pd.lock, lockRankPollDesc)  // 初始化锁
+			pd.rt.init(nil, nil)                  // 初始化读定时器
+			pd.wt.init(nil, nil)                  // 初始化写定时器
+			pd.link = c.first                     // 将新分配的 pollDesc 链接到缓存链表
+			c.first = pd                          // 更新缓存链表的头部
 		}
 	}
-	pd := c.first
-	c.first = pd.link
-	unlock(&c.lock)
-	return pd
+	pd := c.first     // 获取第一个 pollDesc
+	c.first = pd.link // 更新链表头部
+	unlock(&c.lock)   // 解锁
+	return pd         // 返回分配的 pollDesc
 }
 
 // makeArg converts pd to an interface{}.

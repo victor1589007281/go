@@ -84,18 +84,35 @@ type Dialer struct {
 	// With or without a timeout, the operating system may impose
 	// its own earlier timeout. For instance, TCP timeouts are
 	// often around 3 minutes.
+	//
+	// Timeout 是拨号等待连接完成的最大时间。如果同时设置了 Deadline，
+	// 可能会更早失败。
+	//
+	// 默认值为零，表示没有超时限制。
+	//
+	// 当使用 TCP 连接具有多个 IP 地址的主机名时，超时时间可能会在这些地址之间分配。
+	//
+	// 无论是否设置超时，操作系统可能会施加自己的更早的超时限制。
+	// 例如，TCP 超时通常在 3 分钟左右。
 	Timeout time.Duration
 
 	// Deadline is the absolute point in time after which dials
 	// will fail. If Timeout is set, it may fail earlier.
 	// Zero means no deadline, or dependent on the operating system
 	// as with the Timeout option.
+	//
+	// Deadline 是拨号失败的绝对时间点。如果设置了 Timeout，可能会更早失败。
+	// 零值表示没有截止时间，或者依赖于操作系统的超时设置。
 	Deadline time.Time
 
 	// LocalAddr is the local address to use when dialing an
 	// address. The address must be of a compatible type for the
 	// network being dialed.
 	// If nil, a local address is automatically chosen.
+	//
+	// LocalAddr 是进行拨号时使用的本地地址。该地址类型必须与正在拨号的
+	// 网络类型兼容。
+	// 如果为 nil，将自动选择一个本地地址。
 	LocalAddr Addr
 
 	// DualStack previously enabled RFC 6555 Fast Fallback
@@ -105,6 +122,11 @@ type Dialer struct {
 	//
 	// Deprecated: Fast Fallback is enabled by default. To
 	// disable, set FallbackDelay to a negative value.
+	//
+	// DualStack 以前用于启用 RFC 6555 快速回退支持，也称为"Happy Eyeballs"，
+	// 当 IPv6 似乎配置错误或挂起时，会快速尝试 IPv4。
+	//
+	// 已弃用：快速回退默认已启用。要禁用，请将 FallbackDelay 设置为负值。
 	DualStack bool
 
 	// FallbackDelay specifies the length of time to wait before
@@ -115,6 +137,12 @@ type Dialer struct {
 	//
 	// If zero, a default delay of 300ms is used.
 	// A negative value disables Fast Fallback support.
+	//
+	// FallbackDelay 指定在启动 RFC 6555 快速回退连接之前等待的时间长度。
+	// 即在假定 IPv6 配置错误并回退到 IPv4 之前，等待 IPv6 成功的时间。
+	//
+	// 如果为零，使用默认的 300 毫秒延迟。
+	// 负值将禁用快速回退支持。
 	FallbackDelay time.Duration
 
 	// KeepAlive specifies the interval between keep-alive
@@ -127,6 +155,14 @@ type Dialer struct {
 	// system. Network protocols or operating systems that do
 	// not support keep-alive ignore this field.
 	// If negative, keep-alive probes are disabled.
+	//
+	// KeepAlive 指定活动网络连接的保活探测间隔。
+	//
+	// 如果 KeepAliveConfig.Enable 为 true，则忽略此字段。
+	//
+	// 如果为零，且协议和操作系统支持，将使用默认值（当前为 15 秒）发送保活探测。
+	// 不支持保活的网络协议或操作系统会忽略此字段。
+	// 如果为负值，则禁用保活探测。
 	KeepAlive time.Duration
 
 	// KeepAliveConfig specifies the keep-alive probe configuration
@@ -136,9 +172,18 @@ type Dialer struct {
 	// If KeepAliveConfig.Enable is true, keep-alive probes are enabled.
 	// If KeepAliveConfig.Enable is false and KeepAlive is negative,
 	// keep-alive probes are disabled.
+	//
+	// KeepAliveConfig 指定活动网络连接的保活探测配置，
+	// 当协议和操作系统支持时生效。
+	//
+	// 如果 KeepAliveConfig.Enable 为 true，则启用保活探测。
+	// 如果 KeepAliveConfig.Enable 为 false 且 KeepAlive 为负值，
+	// 则禁用保活探测。
 	KeepAliveConfig KeepAliveConfig
 
 	// Resolver optionally specifies an alternate resolver to use.
+	//
+	// Resolver 可选地指定要使用的替代解析器。
 	Resolver *Resolver
 
 	// Cancel is an optional channel whose closure indicates that
@@ -146,6 +191,11 @@ type Dialer struct {
 	// cancellation.
 	//
 	// Deprecated: Use DialContext instead.
+	//
+	// Cancel 是一个可选的通道，其关闭表示应取消拨号。
+	// 并非所有类型的拨号都支持取消。
+	//
+	// 已弃用：请使用 DialContext 替代。
 	Cancel <-chan struct{}
 
 	// If Control is not nil, it is called after creating the network
@@ -156,6 +206,13 @@ type Dialer struct {
 	// will cause the Control function to be called with "tcp4" or "tcp6".
 	//
 	// Control is ignored if ControlContext is not nil.
+	//
+	// Control 如果不为 nil，将在创建网络连接之后但在实际拨号之前调用。
+	//
+	// 传递给 Control 函数的网络和地址参数不一定是传递给 Dial 的参数。
+	// 例如，向 Dial 传递 "tcp" 将导致使用 "tcp4" 或 "tcp6" 调用 Control 函数。
+	//
+	// 如果 ControlContext 不为 nil，则忽略 Control。
 	Control func(network, address string, c syscall.RawConn) error
 
 	// If ControlContext is not nil, it is called after creating the network
@@ -166,11 +223,21 @@ type Dialer struct {
 	// will cause the ControlContext function to be called with "tcp4" or "tcp6".
 	//
 	// If ControlContext is not nil, Control is ignored.
+	//
+	// ControlContext 如果不为 nil，将在创建网络连接之后但在实际拨号之前调用。
+	//
+	// 传递给 ControlContext 函数的网络和地址参数不一定是传递给 Dial 的参数。
+	// 例如，向 Dial 传递 "tcp" 将导致使用 "tcp4" 或 "tcp6" 调用 ControlContext 函数。
+	//
+	// 如果 ControlContext 不为 nil，则忽略 Control。
 	ControlContext func(ctx context.Context, network, address string, c syscall.RawConn) error
 
 	// If mptcpStatus is set to a value allowing Multipath TCP (MPTCP) to be
 	// used, any call to Dial with "tcp(4|6)" as network will use MPTCP if
 	// supported by the operating system.
+	//
+	// 如果 mptcpStatus 设置为允许使用多路径 TCP (MPTCP) 的值，
+	// 则使用 "tcp(4|6)" 作为网络的任何 Dial 调用都将在操作系统支持的情况下使用 MPTCP。
 	mptcpStatus mptcpStatus
 }
 
@@ -477,7 +544,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, address string) (Conn
 	deadline := d.deadline(ctx, time.Now())
 	if !deadline.IsZero() {
 		testHookStepTime()
-		// 如���号器的截止间早于上下文的截止时间，创建新的子上下文
+		// 如果号器的截止间早于上下文的截止时间，创建新的子上下文
 		if d, ok := ctx.Deadline(); !ok || deadline.Before(d) {
 			subCtx, cancel := context.WithDeadline(ctx, deadline)
 			defer cancel()
@@ -549,7 +616,7 @@ func (sd *sysDialer) dialParallel(ctx context.Context, primaries, fallbacks addr
 		return sd.dialSerial(ctx, primaries)
 	}
 
-	// 创建一个通道用于通知其他 goroutine 函数已返回
+	// 创建一个通道用��通知其他 goroutine 函数已返回
 	returned := make(chan struct{})
 	defer close(returned)
 
@@ -598,7 +665,7 @@ func (sd *sysDialer) dialParallel(ctx context.Context, primaries, fallbacks addr
 	for {
 		select {
 		case <-fallbackTimer.C:
-			// 定时器到期，启动后备地址的拨号
+			// ��时器到期，启动后备地址的拨号
 			fallbackCtx, fallbackCancel := context.WithCancel(ctx)
 			defer fallbackCancel()
 			go startRacer(fallbackCtx, false)
@@ -728,7 +795,7 @@ func (sd *sysDialer) dialSingle(ctx context.Context, ra Addr) (c Conn, err error
 			// 如果启用了多路径 TCP，使用 MPTCP 拨号
 			c, err = sd.dialMPTCP(ctx, la, ra)
 		} else {
-			// 否则使用普通 TCP 拨号
+			// 否则使用普��� TCP 拨号
 			c, err = sd.dialTCP(ctx, la, ra)
 		}
 	case *UDPAddr:

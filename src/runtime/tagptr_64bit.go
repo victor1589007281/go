@@ -54,16 +54,34 @@ const taggedPointerBits = (goos.IsAix * aixTagBits) + (goarch.IsRiscv64 * riscv6
 
 // taggedPointerPack created a taggedPointer from a pointer and a tag.
 // Tag bits that don't fit in the result are discarded.
+// 将指针和标记值打包成一个标记指针。
+// 超出可用位数的标记位会被丢弃。
 func taggedPointerPack(ptr unsafe.Pointer, tag uintptr) taggedPointer {
+	// Check if the operating system is AIX
+	// 检查是否为AIX操作系统
 	if GOOS == "aix" {
+		// Ensure the architecture is ppc64, otherwise throw an error
+		// 确保架构为ppc64，否则抛出错误
 		if GOARCH != "ppc64" {
 			throw("check this code for aix on non-ppc64")
 		}
+		// Shift the pointer left by the number of bits not used by the address
+		// and combine it with the tag, ensuring the tag fits within the allowed bits
+		// 将指针左移未被地址使用的位数，并与标记值组合
+		// 确保标记值在允许的位数范围内
 		return taggedPointer(uint64(uintptr(ptr))<<(64-aixAddrBits) | uint64(tag&(1<<aixTagBits-1)))
 	}
+	// Check if the architecture is RISC-V 64-bit
+	// 检查是否为RISC-V 64位架构
 	if GOARCH == "riscv64" {
+		// Similar to AIX, shift the pointer and combine with the tag
+		// 类似于AIX的处理方式，移位指针并与标记值组合
 		return taggedPointer(uint64(uintptr(ptr))<<(64-riscv64AddrBits) | uint64(tag&(1<<riscv64TagBits-1)))
 	}
+	// Default case for other architectures
+	// Shift the pointer and combine with the tag
+	// 其他架构的默认处理方式
+	// 移位指针并与标记值组合
 	return taggedPointer(uint64(uintptr(ptr))<<(64-addrBits) | uint64(tag&(1<<tagBits-1)))
 }
 

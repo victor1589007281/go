@@ -6,16 +6,128 @@ Go的database/sql包实现了一个功能完整、高性能的数据库连接池
 
 ## 核心架构
 
-### 1. 整体设计
+### 1. 整体架构图
 
+```text
+┌─────────────────────────────────────────────────────────────────┐
+│                        Application Layer                        │
+│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐ │
+│  │   sql.Open()    │  │   db.Query()    │  │   db.Exec()     │ │
+│  └─────────────────┘  └─────────────────┘  └─────────────────┘ │
+└─────────────────────┬───────────────────┬───────────────────────┘
+                      │                   │
+┌─────────────────────▼───────────────────▼───────────────────────┐
+│                      database/sql Package                       │
+│                                                                 │
+│  ┌───────────────────────────────────────────────────────────┐ │
+│  │                    DB (连接池管理器)                     │ │
+│  │                                                           │ │
+│  │  ┌─────────────────┐    ┌─────────────────────────────┐  │ │
+│  │  │  Connection     │    │      Pool Management        │  │ │
+│  │  │  Lifecycle      │    │                             │  │ │
+│  │  │                 │    │  • maxOpen (最大连接数)     │  │ │
+│  │  │ • Created       │    │  • maxIdle (最大空闲数)     │  │ │
+│  │  │ • InUse         │    │  • maxLifetime (生存时间)   │  │ │
+│  │  │ • Idle          │    │  • maxIdleTime (空闲时间)   │  │ │
+│  │  │ • Closed        │    │  • connectionCleaner        │  │ │
+│  │  └─────────────────┘    └─────────────────────────────┘  │ │
+│  │                                                           │ │
+│  │  ┌─────────────────┐    ┌─────────────────────────────┐  │ │
+│  │  │   Free Pool     │    │     Request Queue           │  │ │
+│  │  │                 │    │                             │  │ │
+│  │  │ []*driverConn   │◄──►│ map[uint64]chan connRequest │  │ │
+│  │  │                 │    │                             │  │ │
+│  │  │ • LIFO队列      │    │ • 等待连接的请求            │  │ │
+│  │  │ • 快速获取      │    │ • 支持取消操作              │  │ │
+│  │  └─────────────────┘    └─────────────────────────────┘  │ │
+│  └───────────────────────────────────────────────────────────┘ │
+│                                                                 │
+│  ┌───────────────────────────────────────────────────────────┐ │
+│  │                 Connection Opener                         │ │
+│  │                                                           │ │
+│  │  ┌─────────────────┐    ┌─────────────────────────────┐  │ │
+│  │  │   Opener        │    │    Connection Cleaner        │  │ │
+│  │  │   Goroutine     │    │      Goroutine               │  │ │
+│  │  │                 │    │                             │  │ │
+│  │  │ • 异步创建连接   │    │ • 定期清理过期连接          │  │ │
+│  │  │ • 监听openerCh  │    │ • maxLifetime检查           │  │ │
+│  │  │ • 限流控制      │    │ • maxIdleTime检查           │  │ │
+│  │  └─────────────────┘    └─────────────────────────────┘  │ │
+│  └───────────────────────────────────────────────────────────┘ │
+└─────────────────────┬───────────────────┬───────────────────────┘
+                      │                   │
+┌─────────────────────▼───────────────────▼───────────────────────┐
+│                     Driver Interface                            │
+│                                                                 │
+│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐ │
+│  │   Connector     │  │   Connection    │  │   Transaction   │ │
+│  │                 │  │                 │  │                 │ │
+│  │ • Connect()     │  │ • Query()       │  │ • Commit()      │ │
+│  │ • Driver()      │  │ • Exec()        │  │ • Rollback()    │ │
+│  └─────────────────┘  └─────────────────┘  └─────────────────┘ │
+└─────────────────────┬───────────────────┬───────────────────────┘
+                      │                   │
+┌─────────────────────▼───────────────────▼───────────────────────┐
+│                    Database Server                              │
+│                 (MySQL/PostgreSQL/etc.)                        │
+└─────────────────────────────────────────────────────────────────┘
 ```
-DB (数据库实例)
- ├── connPool (连接池)
- │   ├── freeConn (空闲连接队列)
- │   ├── connRequests (连接请求队列)
- │   └── maxIdleConns (最大空闲连接数)
- ├── driver (数据库驱动)
- └── connector (连接器)
+
+### 2. 连接池模块关系图
+
+```text
+                    ┌─────────────────────────────┐
+                    │         Client              │
+                    │    (Application Code)       │
+                    └─────────────┬───────────────┘
+                                  │
+                                  ▼
+                    ┌─────────────────────────────┐
+                    │           DB                │
+                    │     (连接池入口)            │
+                    │                             │
+                    │ • conn() - 获取连接         │
+                    │ • putConn() - 归还连接      │
+                    │ • SetMaxOpenConns()         │
+                    │ • SetMaxIdleConns()         │
+                    └─────────────┬───────────────┘
+                                  │
+         ┌────────────────────────┼────────────────────────┐
+         │                        │                        │
+         ▼                        ▼                        ▼
+┌──────────────────┐    ┌──────────────────┐    ┌──────────────────┐
+│   Connection     │    │   Pool Manager   │    │   Lifecycle      │
+│   Provider       │    │                  │    │   Manager        │
+│                  │    │ • freeConn[]     │    │                  │
+│ • connectionOpener│    │ • connRequests   │    │ • cleaner        │
+│ • openNewConn    │    │ • maxOpen        │    │ • expired()      │
+│ • connector      │    │ • maxIdle        │    │ • resetSession() │
+└──────────────────┘    └──────────────────┘    └──────────────────┘
+         │                        │                        │
+         └────────────────────────┼────────────────────────┘
+                                  │
+                                  ▼
+                    ┌─────────────────────────────┐
+                    │      driverConn             │
+                    │   (连接包装器)              │
+                    │                             │
+                    │ • ci (driver.Conn)          │
+                    │ • createdAt                 │
+                    │ • returnedAt                │
+                    │ • inUse                     │
+                    │ • closed                    │
+                    └─────────────┬───────────────┘
+                                  │
+                                  ▼
+                    ┌─────────────────────────────┐
+                    │      driver.Conn            │
+                    │    (底层数据库连接)         │
+                    │                             │
+                    │ • Query()                   │
+                    │ • Exec()                    │
+                    │ • Begin()                   │
+                    │ • Close()                   │
+                    └─────────────────────────────┘
 ```
 
 ### 2. 核心数据结构
@@ -1177,6 +1289,448 @@ func isRetryableError(err error) bool {
 }
 ```
 
+## MySQL连接存活时间深度分析
+
+### 1. 连接存活时间控制机制
+
+基于Go源码分析，MySQL连接在连接池中的存活时间由两个关键参数控制：
+
+#### 1.1 核心参数
+
+```go
+type DB struct {
+    // 连接生存时间相关参数
+    maxLifetime       time.Duration // 连接最大生存时间
+    maxIdleTime       time.Duration // 连接最大空闲时间
+}
+
+type driverConn struct {
+    createdAt  time.Time // 连接创建时间
+    returnedAt time.Time // 连接归还时间（最后一次使用完毕的时间）
+}
+```
+
+#### 1.2 存活时间判定逻辑
+
+```go
+// 源码: src/database/sql/sql.go:587-592
+func (dc *driverConn) expired(timeout time.Duration) bool {
+    if timeout <= 0 {
+        return false
+    }
+    return dc.createdAt.Add(timeout).Before(nowFunc())
+}
+
+// 源码: src/database/sql/sql.go:1171-1192  
+// 在connectionCleanerRunLocked中的清理逻辑
+if db.maxLifetime > 0 {
+    expiredSince := nowFunc().Add(-db.maxLifetime)
+    for i := 0; i < len(db.freeConn); i++ {
+        c := db.freeConn[i]
+        // 检查连接创建时间是否超过maxLifetime
+        if c.createdAt.Before(expiredSince) {
+            closing = append(closing, c)
+            // 标记为需要关闭的连接
+        }
+    }
+}
+
+if db.maxIdleTime > 0 {
+    idleSince := nowFunc().Add(-db.maxIdleTime)
+    for i := last; i >= 0; i-- {
+        c := db.freeConn[i]
+        // 检查连接归还时间是否超过maxIdleTime
+        if c.returnedAt.Before(idleSince) {
+            // 标记为需要关闭的连接
+        }
+    }
+}
+```
+
+### 2. 参数设置方法
+
+```go
+// 源码: src/database/sql/sql.go:1047-1062
+// 设置连接最大生存时间
+func (db *DB) SetConnMaxLifetime(d time.Duration) {
+    if d < 0 {
+        d = 0
+    }
+    db.mu.Lock()
+    // 如果缩短了生存时间，立即唤醒清理器
+    if d > 0 && d < db.maxLifetime && db.cleanerCh != nil {
+        select {
+        case db.cleanerCh <- struct{}{}:
+        default:
+        }
+    }
+    db.maxLifetime = d
+    db.startCleanerLocked()
+    db.mu.Unlock()
+}
+
+// 源码: src/database/sql/sql.go:1069-1085
+// 设置连接最大空闲时间
+func (db *DB) SetConnMaxIdleTime(d time.Duration) {
+    if d < 0 {
+        d = 0
+    }
+    db.mu.Lock()
+    defer db.mu.Unlock()
+    
+    // 如果缩短了空闲时间，立即唤醒清理器
+    if d > 0 && d < db.maxIdleTime && db.cleanerCh != nil {
+        select {
+        case db.cleanerCh <- struct{}{}:
+        default:
+        }
+    }
+    db.maxIdleTime = d
+    db.startCleanerLocked()
+}
+```
+
+### 3. 连接清理机制
+
+#### 3.1 清理器启动条件
+
+```go
+// 源码: src/database/sql/sql.go:1088-1093
+func (db *DB) startCleanerLocked() {
+    // 只有在设置了maxLifetime或maxIdleTime，且有连接存在时才启动清理器
+    if (db.maxLifetime > 0 || db.maxIdleTime > 0) && db.numOpen > 0 && db.cleanerCh == nil {
+        db.cleanerCh = make(chan struct{}, 1)
+        go db.connectionCleaner(db.shortestIdleTimeLocked())
+    }
+}
+```
+
+#### 3.2 清理器执行频率
+
+```go
+// 源码: src/database/sql/sql.go:1095-1136
+func (db *DB) connectionCleaner(d time.Duration) {
+    const minInterval = time.Second // 最小清理间隔1秒
+    
+    if d < minInterval {
+        d = minInterval
+    }
+    t := time.NewTimer(d)
+    
+    for {
+        select {
+        case <-t.C:           // 定时器触发
+        case <-db.cleanerCh:  // 参数变更触发
+        }
+        
+        // 执行清理逻辑...
+        d, closing := db.connectionCleanerRunLocked(d)
+        
+        // 关闭过期连接
+        for _, c := range closing {
+            c.Close()
+        }
+        
+        // 重置定时器，使用较短的清理间隔
+        if d < minInterval {
+            d = minInterval
+        }
+        t.Reset(d)
+    }
+}
+```
+
+### 4. 连接存活时间结论
+
+#### 4.1 存活时间计算
+
+**对于一个正常存在的MySQL连接，其在连接池中的存活时间由以下规则决定：**
+
+1. **基于创建时间的限制**：
+   - 连接从 `createdAt` 开始计时
+   - 最多存活 `maxLifetime` 时间
+   - 超过后无论是否在使用都会被标记为过期
+
+2. **基于空闲时间的限制**：
+   - 连接从 `returnedAt` 开始计时（归还到空闲队列的时间）
+   - 最多空闲 `maxIdleTime` 时间
+   - 只对空闲连接生效
+
+3. **实际存活时间**：
+
+   ```text
+   实际存活时间 = min(maxLifetime - 已存活时间, maxIdleTime - 已空闲时间)
+   ```
+
+#### 4.2 关键时间节点
+
+```go
+// 连接生命周期关键时间点
+type ConnectionLifecycle struct {
+    CreatedAt  time.Time // 连接创建时间（影响maxLifetime判断）
+    ReturnedAt time.Time // 最后归还时间（影响maxIdleTime判断）
+    
+    // 过期检查点
+    MaxLifetimeExpiry time.Time // createdAt + maxLifetime
+    MaxIdleExpiry     time.Time // returnedAt + maxIdleTime
+}
+
+func (cl *ConnectionLifecycle) IsExpired(now time.Time) bool {
+    // 任一条件满足都会过期
+    lifetimeExpired := now.After(cl.MaxLifetimeExpiry)
+    idleExpired := now.After(cl.MaxIdleExpiry)
+    
+    return lifetimeExpired || idleExpired
+}
+```
+
+#### 4.3 默认值和推荐设置
+
+```go
+// 默认情况（未设置时）
+// maxLifetime = 0  // 永不过期
+// maxIdleTime = 0  // 永不因空闲过期
+
+// 生产环境推荐设置
+func RecommendedSettings() {
+    db.SetConnMaxLifetime(30 * time.Minute)  // 30分钟最大生存时间
+    db.SetConnMaxIdleTime(5 * time.Minute)   // 5分钟最大空闲时间
+    
+    // 这样配置的连接：
+    // - 创建后最多存活30分钟
+    // - 空闲状态最多持续5分钟
+    // - 实际存活时间取决于使用模式和两个参数的限制
+}
+```
+
+#### 4.4 存活时间实例分析
+
+```go
+// 场景1：频繁使用的连接
+// 创建时间：10:00:00
+// 设置：maxLifetime=30min, maxIdleTime=5min
+// 如果连接一直被频繁使用，每次使用后立即归还
+// 结果：在10:30:00时因maxLifetime过期，无论是否空闲
+
+// 场景2：偶尔使用的连接  
+// 创建时间：10:00:00，最后使用：10:10:00
+// 设置：maxLifetime=30min, maxIdleTime=5min
+// 结果：在10:15:00时因maxIdleTime过期（空闲5分钟）
+
+// 场景3：未设置任何限制
+// maxLifetime=0, maxIdleTime=0
+// 结果：连接永不自动过期（直到数据库端超时或网络断开）
+```
+
+**总结：MySQL连接的存活时间由 `maxLifetime` 和 `maxIdleTime` 两个参数共同控制，实际存活时间取决于更严格的那个限制条件。**
+
+## 连接状态转换图
+
+### 1. 连接生命周期状态
+
+```text
+                    ┌─────────────────┐
+                    │    Initial      │
+                    │   (初始状态)    │
+                    └─────────┬───────┘
+                              │ connector.Connect()
+                              ▼
+                    ┌─────────────────┐
+                    │    Created      │
+                    │   (已创建)      │
+                    └─────────┬───────┘
+                              │ conn()
+                              ▼
+     ┌──────────────┐  ┌─────────────────┐  ┌──────────────┐
+     │    Error     │  │     InUse       │  │   Expired    │
+     │   (错误)     │◄─│   (使用中)      │─►│   (已过期)   │
+     └──────┬───────┘  └─────────┬───────┘  └──────┬───────┘
+            │                    │ putConn()       │
+            │                    ▼                 │
+            │          ┌─────────────────┐         │
+            │          │      Idle       │         │
+            │          │     (空闲)      │         │
+            │          └─────────┬───────┘         │
+            │                    │                 │
+            │                    │ expired()       │
+            │                    ▼                 │
+            │          ┌─────────────────┐         │
+            │          │    Closing      │         │
+            │          │   (关闭中)      │         │
+            │          └─────────┬───────┘         │
+            │                    │                 │
+            └────────────────────┼─────────────────┘
+                                 │ Close()
+                                 ▼
+                    ┌─────────────────┐
+                    │     Closed      │
+                    │    (已关闭)     │
+                    └─────────────────┘
+```
+
+### 2. 连接获取流程图
+
+```text
+                        ┌─────────────────┐
+                        │   Client Call   │
+                        │   db.conn()     │
+                        └─────────┬───────┘
+                                  │
+                                  ▼
+                        ┌─────────────────┐
+                        │  Check Context  │
+                        │   ctx.Done()?   │
+                        └─────────┬───────┘
+                                  │ No
+                                  ▼
+                        ┌─────────────────┐      Yes    ┌─────────────────┐
+                        │ Check freeConn  │─────────────►│  Get from Pool  │
+                        │   len > 0?      │              │                 │
+                        └─────────┬───────┘              └─────────┬───────┘
+                                  │ No                             │
+                                  ▼                                ▼
+                        ┌─────────────────┐                ┌─────────────────┐
+                        │ Check maxOpen   │                │ Check Expired   │
+                        │ numOpen < max?  │                │   expired()?    │
+                        └─────────┬───────┘                └─────────┬───────┘
+                                  │                                  │
+                         No       │       Yes                 Yes    │    No
+                    ┌─────────────▼───────────────┐                  │
+                    │                             │                  ▼
+                    ▼                             ▼        ┌─────────────────┐
+        ┌─────────────────┐            ┌─────────────────┐ │ Reset Session   │
+        │  Wait for Conn  │            │  Create New     │ │  Return Conn    │
+        │                 │            │  Connection     │ └─────────┬───────┘
+        │ • Add to queue  │            └─────────┬───────┘           │
+        │ • Block/Cancel  │                      │                   │
+        └─────────┬───────┘                      │                   │
+                  │                              │                   │
+                  └──────────────┬───────────────┘                   │
+                                 │                                   │
+                                 └───────────────┬───────────────────┘
+                                                 │
+                                                 ▼
+                                   ┌─────────────────┐
+                                   │ Return driverConn│
+                                   │   to Client     │
+                                   └─────────────────┘
+```
+
+### 3. 连接归还流程图
+
+```text
+                        ┌─────────────────┐
+                        │   Client Call   │
+                        │  putConn(dc)    │
+                        └─────────┬───────┘
+                                  │
+                                  ▼
+                        ┌─────────────────┐
+                        │  Check Error    │
+                        │  err != nil?    │
+                        └─────────┬───────┘
+                                  │
+                             Yes  │   No
+                    ┌─────────────▼────────────────┐
+                    │                              │
+                    ▼                              ▼
+        ┌─────────────────┐            ┌─────────────────┐
+        │  Check BadConn  │            │ Set returnedAt  │
+        │ ErrBadConn?     │            │   time.Now()    │
+        └─────────┬───────┘            └─────────┬───────┘
+                  │                              │
+             Yes  │   No                         ▼
+        ┌─────────▼───────┐            ┌─────────────────┐
+        │  Close & Open   │            │ Check Requests  │
+        │  New Connection │            │  len(queue)>0?  │
+        └─────────────────┘            └─────────┬───────┘
+                                                 │
+                                            Yes  │   No
+                                   ┌─────────────▼────────────────┐
+                                   │                              │
+                                   ▼                              ▼
+                         ┌─────────────────┐            ┌─────────────────┐
+                         │  Assign to      │            │ Check Idle Limit│
+                         │  Waiting Client │            │maxIdle reached? │
+                         └─────────────────┘            └─────────┬───────┘
+                                                                  │
+                                                             No   │   Yes
+                                                    ┌─────────────▼───────┐
+                                                    │                      │
+                                                    ▼                      ▼
+                                          ┌─────────────────┐    ┌─────────────────┐
+                                          │ Add to freeConn │    │   Close Conn    │
+                                          │     Pool        │    │                 │
+                                          └─────────────────┘    └─────────────────┘
+```
+
+### 4. 连接清理运行图
+
+```text
+                        ┌─────────────────┐
+                        │ Cleaner Timer   │
+                        │   Triggered     │
+                        └─────────┬───────┘
+                                  │
+                                  ▼
+                        ┌─────────────────┐
+                        │ Lock freeConn   │
+                        │     Pool        │
+                        └─────────┬───────┘
+                                  │
+                                  ▼
+                        ┌─────────────────┐
+                        │ Iterate Each    │
+                        │   Connection    │
+                        └─────────┬───────┘
+                                  │
+                                  ▼
+                        ┌─────────────────┐
+                        │ Check Lifetime  │
+                        │ createdAt +     │
+                        │ maxLifetime     │
+                        └─────────┬───────┘
+                                  │
+                             Yes  │   No
+                    ┌─────────────▼───────────────┐
+                    │                             │
+                    ▼                             ▼
+        ┌─────────────────┐            ┌─────────────────┐
+        │ Mark for Close  │            │ Check IdleTime  │
+        │                 │            │ returnedAt +    │
+        └─────────┬───────┘            │ maxIdleTime     │
+                  │                    └─────────┬───────┘
+                  │                              │
+                  │                         Yes  │   No
+                  │                ┌─────────────▼───────┐
+                  │                │                     │
+                  │                ▼                     ▼
+                  │    ┌─────────────────┐     ┌─────────────────┐
+                  │    │ Mark for Close  │     │   Keep Alive    │
+                  │    │                 │     │                 │
+                  │    └─────────┬───────┘     └─────────────────┘
+                  │              │
+                  └──────────────┼──────────────┘
+                                 │
+                                 ▼
+                        ┌─────────────────┐
+                        │ Close Marked    │
+                        │  Connections    │
+                        └─────────┬───────┘
+                                  │
+                                  ▼
+                        ┌─────────────────┐
+                        │ Update Pool     │
+                        │   Statistics    │
+                        └─────────┬───────┘
+                                  │
+                                  ▼
+                        ┌─────────────────┐
+                        │ Reset Timer     │
+                        │  Next Round     │
+                        └─────────────────┘
+```
+
 ## 总结
 
 Go的database/sql连接池实现了一个完整而高效的数据库连接管理系统：
@@ -1188,6 +1742,7 @@ Go的database/sql连接池实现了一个完整而高效的数据库连接管理
 5. **性能优化**: 连接池、语句缓存、批量操作等优化
 
 理解连接池原理有助于：
+
 - 正确配置连接池参数
 - 诊断数据库性能问题
 - 优化应用数据库访问模式

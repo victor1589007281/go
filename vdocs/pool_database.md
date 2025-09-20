@@ -1458,9 +1458,11 @@ func (db *DB) connectionCleaner(d time.Duration) {
 
 3. **实际存活时间**：
 
-   ```text
+   
+```text
    实际存活时间 = min(maxLifetime - 已存活时间, maxIdleTime - 已空闲时间)
-   ```
+   
+```
 
 #### 4.2 关键时间节点
 
@@ -1731,6 +1733,449 @@ func RecommendedSettings() {
                         └─────────────────┘
 ```
 
+## 事务完整时序图
+
+### 1. 事务从开始到提交的完整流程
+
+```mermaid
+sequenceDiagram
+    participant Client as 客户端
+    participant DB as 数据库连接池
+    participant Pool as 连接池管理器
+    participant Conn as 数据库连接
+    participant Driver as 数据库驱动
+    participant MySQL as MySQL服务器
+    
+    Note over Client,MySQL: 数据库事务完整生命周期
+    
+    rect rgb(245, 250, 255)
+        Note over Client,Pool: Phase 1: 事务开始阶段
+        
+        Client->>DB: BeginTx(ctx, opts)
+        Note right of DB: 开始事务请求
+        
+        DB->>Pool: conn(ctx, strategy)
+        Note right of Pool: 从连接池获取连接
+        
+        alt 空闲连接可用
+            Pool-->>Conn: 获取空闲连接
+            Note right of Conn: 状态: Idle → InUse
+        else 需要创建新连接
+            Pool->>Driver: connector.Connect(ctx)
+            Driver->>MySQL: 建立TCP连接
+            MySQL-->>Driver: 连接握手成功
+            Driver-->>Pool: 返回新连接
+            Note right of Pool: numOpen++
+        else 达到最大连接数
+            Pool->>Pool: 加入等待队列
+            Note right of Pool: waitCount++, 阻塞等待
+            Pool-->>DB: 等待可用连接
+        end
+        
+        Pool-->>DB: 返回driverConn
+        
+        DB->>Conn: beginDC(ctx, dc, release, opts)
+        Conn->>Driver: Begin() SQL命令
+        Driver->>MySQL: START TRANSACTION
+        MySQL-->>Driver: 事务开始确认
+        Driver-->>Conn: driver.Tx对象
+        
+        Conn-->>DB: Tx对象 + 连接绑定
+        DB-->>Client: 返回*Tx对象
+        
+        Note over Conn: 连接状态: 被事务独占使用
+    end
+    
+    rect rgb(250, 255, 250)
+        Note over Client,MySQL: Phase 2: 事务执行阶段
+        
+        loop 业务SQL执行
+            Client->>DB: tx.Query/Exec(sql, args...)
+            DB->>Conn: 使用绑定的连接
+            Note right of Conn: 连接被事务独占
+            Conn->>Driver: Query/Exec SQL
+            Driver->>MySQL: 执行SQL语句
+            MySQL-->>Driver: 返回结果
+            Driver-->>Conn: 结果数据
+            Conn-->>DB: 封装结果
+            DB-->>Client: 返回结果
+        end
+    end
+    
+    rect rgb(255, 250, 245)
+        Note over Client,MySQL: Phase 3: 事务提交阶段
+        
+        Client->>DB: tx.Commit()
+        Note right of DB: 提交事务
+        
+        DB->>Conn: 检查tx.done状态
+        DB->>Conn: withLock(dc, commit)
+        Conn->>Driver: txi.Commit()
+        Driver->>MySQL: COMMIT
+        MySQL-->>Driver: 提交成功
+        Driver-->>Conn: 提交确认
+        
+        Conn->>Pool: releaseConn(nil)
+        Note right of Pool: 连接状态: InUse → 准备归还
+        
+        alt 有等待请求
+            Pool->>Pool: 分配给等待的请求
+            Note right of Pool: waitCount--, 连接直接转移
+        else 未达到maxIdle限制
+            Pool->>Pool: 加入freeConn队列
+            Note right of Pool: 连接状态: InUse → Idle
+            Pool->>Pool: startCleanerLocked()
+        else 超过maxIdle限制
+            Pool->>Conn: Close()
+            Conn->>MySQL: 关闭TCP连接
+            Note right of Pool: numOpen--
+        end
+        
+        Pool-->>DB: 连接归还完成
+        DB-->>Client: 事务提交成功
+    end
+```
+
+### 2. 事务回滚场景时序图
+
+```mermaid
+sequenceDiagram
+    participant Client as 客户端
+    participant DB as 数据库连接池  
+    participant Pool as 连接池管理器
+    participant Conn as 数据库连接
+    participant Driver as 数据库驱动
+    participant MySQL as MySQL服务器
+    
+    Note over Client,MySQL: 事务回滚处理流程
+    
+    rect rgb(255, 245, 245)
+        Note over Client,Pool: 回滚触发场景
+        
+        alt 主动回滚
+            Client->>DB: tx.Rollback()
+        else Context取消
+            Note over Client: ctx.Done()信号
+            DB->>DB: awaitDone()检测到取消
+        else 连接错误
+            Conn-->>DB: driver.ErrBadConn
+            DB->>DB: 自动回滚处理
+        end
+    end
+    
+    rect rgb(250, 240, 240)
+        Note over Client,MySQL: 回滚执行阶段
+        
+        DB->>Conn: 检查tx.done状态
+        DB->>Conn: tx.cancel() 取消上下文
+        
+        DB->>Conn: tx.closemu.Lock()
+        Note right of Conn: 确保无其他查询在执行
+        
+        DB->>Conn: withLock(dc, rollback)
+        Conn->>Driver: txi.Rollback()
+        Driver->>MySQL: ROLLBACK
+        MySQL-->>Driver: 回滚成功
+        Driver-->>Conn: 回滚确认
+        
+        DB->>DB: closePrepared() 清理预处理语句
+        
+        alt 连接状态良好
+            Conn->>Pool: releaseConn(nil)
+            Note right of Pool: 连接可复用，归还到池中
+        else 连接损坏
+            Conn->>Pool: releaseConn(ErrBadConn)
+            Pool->>Conn: Close() 关闭坏连接
+            Pool->>Pool: maybeOpenNewConnections()
+            Note right of Pool: 可能需要创建新连接
+        end
+        
+        Pool-->>DB: 连接处理完成
+        DB-->>Client: 回滚完成
+    end
+```
+
+## 数据库连接池完整架构图
+
+### 1. 连接池核心架构与管理功能
+
+```mermaid
+graph TB
+    subgraph APP_LAYER ["应用层"]
+        A["业务代码"] --> B["sql.DB"]
+        B --> C["BeginTx/Query/Exec"]
+    end
+    
+    subgraph POOL_MANAGER ["连接池核心管理器"]
+        D["DB结构体"] --> E["连接获取器"]
+        D --> F["连接归还器"]
+        D --> G["池参数管理器"]
+        
+        E --> H{"获取策略判断"}
+        H -->|"空闲连接可用"| I["空闲连接池"]
+        H -->|"需要新建"| J["连接创建器"]
+        H -->|"达到上限"| K["请求等待队列"]
+        
+        subgraph FREE_POOL ["空闲连接池freeConn"]
+            I --> I1["连接1<br/>状态: Idle<br/>创建时间: t1<br/>归还时间: t2"]
+            I --> I2["连接2<br/>状态: Idle<br/>创建时间: t3<br/>归还时间: t4"]
+            I --> I3["连接N<br/>状态: Idle<br/>LIFO队列结构"]
+        end
+        
+        subgraph IN_USE_TRACK ["使用中连接追踪"]
+            L["连接状态管理"]
+            L --> L1["连接A<br/>状态: InUse<br/>绑定: Tx1<br/>使用开始: t5"]
+            L --> L2["连接B<br/>状态: InUse<br/>绑定: Query<br/>使用开始: t6"]
+            L --> L3["连接C<br/>状态: InUse<br/>绑定: Stmt<br/>使用开始: t7"]
+        end
+        
+        subgraph WAIT_QUEUE ["请求等待队列connRequests"]
+            K --> K1["等待请求1<br/>reqKey: 1001<br/>等待时间: t8<br/>超时设置: 30s"]
+            K --> K2["等待请求2<br/>reqKey: 1002<br/>等待时间: t9<br/>Context: ctx"]
+            K --> K3["等待请求N<br/>FIFO处理顺序"]
+        end
+        
+        subgraph CONN_OPENER ["连接创建器connectionOpener"]
+            J --> J1["异步创建goroutine"]
+            J1 --> J2["openerCh信号监听"]
+            J2 --> J3["connector.Connect()"]
+            J3 --> J4["连接验证与包装"]
+            J4 --> J5["更新numOpen计数"]
+        end
+    end
+    
+    subgraph LIFECYCLE ["连接生命周期管理"]
+        M["连接清理器"] --> N["定时清理任务"]
+        N --> N1{"maxLifetime检查"}
+        N --> N2{"maxIdleTime检查"}
+        N --> N3{"连接健康检查"}
+        
+        N1 -->|"超时"| O["标记过期连接"]
+        N2 -->|"超时"| O
+        N3 -->|"异常"| O
+        O --> P["批量关闭连接"]
+        P --> Q["更新池统计信息"]
+        
+        subgraph POOL_CONFIG ["池参数配置"]
+            G --> G1["maxOpen: 最大连接数"]
+            G --> G2["maxIdle: 最大空闲数"] 
+            G --> G3["maxLifetime: 连接生存时间"]
+            G --> G4["maxIdleTime: 最大空闲时间"]
+        end
+    end
+    
+    subgraph MONITORING ["监控与统计"]
+        R["DBStats统计器"] --> S["实时监控数据"]
+        S --> S1["OpenConnections: 当前连接数"]
+        S --> S2["InUse: 使用中连接数"]
+        S --> S3["Idle: 空闲连接数"]
+        S --> S4["WaitCount: 累计等待次数"]
+        S --> S5["WaitDuration: 累计等待时间"]
+        
+        T["性能分析器"] --> U["连接池效率分析"]
+        U --> U1["连接复用率"]
+        U --> U2["等待时间分析"]
+        U --> U3["连接周转率"]
+        U --> U4["错误率统计"]
+    end
+    
+    subgraph DRIVER_INTERFACE ["底层驱动接口"]
+        V["driver.Connector"] --> W["Connect()创建连接"]
+        V --> X["Driver()获取驱动信息"]
+        
+        W --> Y["driver.Conn"]
+        Y --> Y1["Query()查询"]
+        Y --> Y2["Exec()执行"]
+        Y --> Y3["Begin()开始事务"]
+        Y --> Y4["Close()关闭连接"]
+        
+        Z["driver.Tx事务接口"]
+        Z --> Z1["Commit()提交"]
+        Z --> Z2["Rollback()回滚"]
+    end
+    
+    C -.-> E
+    F -.-> I
+    L -.-> F
+    M -.-> I
+    R -.-> D
+    J3 -.-> W
+    Y3 -.-> Z
+    
+    style APP_LAYER fill:#e8f5e8,stroke:#333,stroke-width:2px
+    
+    style POOL_MANAGER fill:#e1f5fe,stroke:#333,stroke-width:2px
+    
+    style LIFECYCLE fill:#fff3e0,stroke:#333,stroke-width:2px
+    
+    style MONITORING fill:#f3e5f5,stroke:#333,stroke-width:2px
+    
+    style DRIVER_INTERFACE fill:#ffecb3,stroke:#333,stroke-width:2px
+    
+    style FREE_POOL fill:#f0fff0,stroke:#32cd32,stroke-width:2px
+    
+    style IN_USE_TRACK fill:#fff0f0,stroke:#ff6b6b,stroke-width:2px
+    
+    style WAIT_QUEUE fill:#f0f8ff,stroke:#4169e1,stroke-width:2px
+    
+    style CONN_OPENER fill:#fffaf0,stroke:#ffa500,stroke-width:2px
+    
+    style POOL_CONFIG fill:#f5f5dc,stroke:#8b4513,stroke-width:2px
+```
+
+### 2. 连接状态转换与池管理流程
+
+```mermaid
+stateDiagram-v2
+    [*] --> 创建请求: 客户端调用
+    
+    创建请求 --> 检查空闲池: conn(ctx, strategy)
+    
+    检查空闲池 --> 获取空闲连接: freeConn队列有连接
+    检查空闲池 --> 检查连接限制: freeConn队列为空
+    
+    获取空闲连接 --> 连接有效性检查: 从队列头部获取
+    连接有效性检查 --> 重置连接会话: 连接有效
+    连接有效性检查 --> 检查空闲池: 连接过期,重新获取
+    
+    检查连接限制 --> 创建新连接: numOpen 小于 maxOpen
+    检查连接限制 --> 加入等待队列: numOpen 达到 maxOpen
+    
+    创建新连接 --> 异步连接创建: 发送信号到openerCh
+    异步连接创建 --> 驱动连接创建: connector.Connect()
+    驱动连接创建 --> 连接包装: 创建driverConn对象
+    连接包装 --> 更新计数器: numOpen递增
+    更新计数器 --> 重置连接会话
+    
+    加入等待队列 --> 阻塞等待: 加入connRequests映射
+    阻塞等待 --> 获得可用连接: 其他连接归还时唤醒
+    阻塞等待 --> 等待超时取消: Context超时或取消
+    获得可用连接 --> 重置连接会话
+    
+    重置连接会话 --> 使用中状态: 标记inUse=true
+    使用中状态 --> 执行业务逻辑: Query/Exec/Transaction
+    
+    执行业务逻辑 --> 连接归还: putConn()调用
+    等待超时取消 --> [*]: 返回错误
+    
+    连接归还 --> 错误检查: 检查归还时的错误
+    错误检查 --> 连接关闭: err == ErrBadConn
+    错误检查 --> 检查等待队列: 连接状态正常
+    
+    连接关闭 --> 更新计数器关闭: numOpen递减
+    更新计数器关闭 --> 触发新连接创建: maybeOpenNewConnections()
+    触发新连接创建 --> [*]
+    
+    检查等待队列 --> 分配给等待者: connRequests不为空
+    检查等待队列 --> 检查空闲限制: 无等待请求
+    
+    分配给等待者 --> 使用中状态: 直接转移给等待的goroutine
+    
+    检查空闲限制 --> 加入空闲池: len(freeConn) < maxIdle
+    检查空闲限制 --> 连接关闭: 超过maxIdle限制
+    
+    加入空闲池 --> 启动清理器: startCleanerLocked()
+    启动清理器 --> 空闲状态: 连接进入freeConn队列
+    
+    空闲状态 --> 连接归还: 被再次使用
+    空闲状态 --> 过期清理: 清理器检查过期
+    
+    过期清理 --> 连接关闭: maxLifetime或maxIdleTime超时
+```
+
+### 3. 连接池监控与健康检查架构
+
+```mermaid
+graph TB
+    subgraph MONITOR_SYS ["连接池监控系统"]
+        A["监控入口"] --> B["实时统计收集器"]
+        B --> C["健康状态检查器"]
+        C --> D["告警处理器"]
+        
+        subgraph STATS_COLLECTION ["统计数据采集"]
+            B --> B1["连接数统计<br/>• OpenConnections<br/>• InUse<br/>• Idle"]
+            
+            B --> B2["性能指标采集<br/>• WaitCount<br/>• WaitDuration<br/>• 平均等待时间"]
+            
+            B --> B3["连接生命周期统计<br/>• MaxIdleClosed<br/>• MaxLifetimeClosed<br/>• MaxIdleTimeClosed"]
+            
+            B --> B4["错误统计<br/>• BadConn次数<br/>• 连接创建失败<br/>• 超时次数"]
+        end
+        
+        subgraph HEALTH_RULES ["健康检查规则"]
+            C --> C1{"连接使用率检查<br/>Open/Max > 80%?"}
+            C --> C2{"等待时间检查<br/>AvgWait > 100ms?"}
+            C --> C3{"连接周转率检查<br/>ClosedRate > 10x?"}
+            C --> C4{"错误率检查<br/>ErrorRate > 5%?"}
+            
+            C1 -->|"异常"| E["高连接使用率告警"]
+            C2 -->|"异常"| F["高延迟告警"]
+            C3 -->|"异常"| G["高周转率告警"] 
+            C4 -->|"异常"| H["高错误率告警"]
+        end
+        
+        subgraph AUTO_HANDLE ["自动化处理"]
+            D --> D1["动态参数调整"]
+            D --> D2["连接预热"]
+            D --> D3["故障恢复"]
+            
+            D1 --> D11["增加maxOpen"]
+            D1 --> D12["调整maxLifetime"]
+            D1 --> D13["优化maxIdleTime"]
+            
+            D2 --> D21["预创建连接"]
+            D2 --> D22["连接池预热"]
+            
+            D3 --> D31["重建损坏连接"]
+            D3 --> D32["清理异常连接"]
+            D3 --> D33["重置连接池状态"]
+        end
+    end
+    
+    subgraph CLEANER_SYS ["清理器子系统"]
+        I["connectionCleaner"] --> J["定时触发器"]
+        J --> K["清理策略执行器"]
+        
+        K --> K1{"生存时间检查<br/>createdAt + maxLifetime"}
+        K --> K2{"空闲时间检查<br/>returnedAt + maxIdleTime"}
+        K --> K3{"连接健康检查<br/>driver.Validator"}
+        
+        K1 -->|"过期"| L["标记清理连接"]
+        K2 -->|"过期"| L
+        K3 -->|"不健康"| L
+        
+        L --> M["批量关闭连接"]
+        M --> N["更新池状态"]
+        N --> O["统计信息更新"]
+        
+        subgraph CLEAN_CONFIG ["清理策略配置"]
+            P["清理间隔计算"]
+            P --> P1["min(maxLifetime, maxIdleTime)时间"]
+            P --> P2["最小间隔: 1秒"]
+            P --> P3["动态调整清理频率"]
+        end
+    end
+    
+    E --> D
+    F --> D  
+    G --> D
+    H --> D
+    
+    O --> B
+    
+    style MONITOR_SYS fill:#f0f8ff,stroke:#4169e1,stroke-width:2px
+    
+    style STATS_COLLECTION fill:#f0fff0,stroke:#32cd32,stroke-width:2px
+    
+    style HEALTH_RULES fill:#fff0f0,stroke:#ff6b6b,stroke-width:2px
+    
+    style AUTO_HANDLE fill:#fffaf0,stroke:#ffa500,stroke-width:2px
+    
+    style CLEANER_SYS fill:#f5f5dc,stroke:#8b4513,stroke-width:2px
+    
+    style CLEAN_CONFIG fill:#f0f0f0,stroke:#666,stroke-width:1px
+```
+
 ## 总结
 
 Go的database/sql连接池实现了一个完整而高效的数据库连接管理系统：
@@ -1740,6 +2185,8 @@ Go的database/sql连接池实现了一个完整而高效的数据库连接管理
 3. **生命周期控制**: 支持连接超时、空闲超时等策略
 4. **错误恢复**: 自动检测坏连接并重试
 5. **性能优化**: 连接池、语句缓存、批量操作等优化
+6. **事务支持**: 完整的事务生命周期管理与连接绑定
+7. **监控与诊断**: 全面的统计信息和健康检查机制
 
 理解连接池原理有助于：
 
@@ -1747,5 +2194,6 @@ Go的database/sql连接池实现了一个完整而高效的数据库连接管理
 - 诊断数据库性能问题
 - 优化应用数据库访问模式
 - 实现高性能数据库应用
+- 设计可靠的事务处理逻辑
 
 掌握连接池机制是Go数据库编程的重要技能。
